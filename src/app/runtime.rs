@@ -16,6 +16,7 @@ pub(crate) struct WorkspaceGitRefreshItem {
     pub(crate) workspace_id: String,
     pub(crate) resolved_identity_cwd: std::path::PathBuf,
     pub(crate) cache_key: std::path::PathBuf,
+    pub(crate) loaded_commit_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +30,8 @@ pub(crate) struct WorkspaceGitRefreshJob {
     pub(crate) cache_key: std::path::PathBuf,
     pub(crate) status_cwd: std::path::PathBuf,
     pub(crate) cached: Option<GitStatusCacheEntry>,
+    /// Largest commit window any workspace sharing this repo wants loaded.
+    pub(crate) loaded_commit_count: usize,
     pub(crate) targets: Vec<WorkspaceGitRefreshTarget>,
 }
 
@@ -556,6 +559,7 @@ impl App {
                     workspace_id: ws.id.clone(),
                     resolved_identity_cwd: cwd,
                     cache_key,
+                    loaded_commit_count: ws.loaded_commit_count(),
                 })
             })
             .collect()
@@ -600,6 +604,9 @@ pub(crate) fn deduplicate_git_refresh_items(
         };
         if let Some(&index) = indexes.get(&item.cache_key) {
             jobs[index].targets.push(target);
+            jobs[index].loaded_commit_count = jobs[index]
+                .loaded_commit_count
+                .max(item.loaded_commit_count);
             continue;
         }
 
@@ -610,6 +617,7 @@ pub(crate) fn deduplicate_git_refresh_items(
             cache_key: status_cwd.clone(),
             status_cwd,
             cached,
+            loaded_commit_count: item.loaded_commit_count,
             targets: vec![target],
         });
     }
@@ -625,8 +633,11 @@ pub(crate) fn refresh_workspace_git_statuses_with_cache(
     let mut cache_updates = Vec::new();
 
     for job in deduplicate_git_refresh_items(items, cache) {
-        let (snapshot, cache_entry) =
-            Workspace::git_status_snapshot_for_cwd_with_cache(&job.status_cwd, job.cached.as_ref());
+        let (snapshot, cache_entry) = Workspace::git_status_snapshot_for_cwd_with_cache(
+            &job.status_cwd,
+            job.cached.as_ref(),
+            job.loaded_commit_count,
+        );
         if let Some(cache_entry) = cache_entry {
             cache_updates.push((job.cache_key.clone(), cache_entry));
         }
@@ -693,11 +704,13 @@ mod tests {
                     workspace_id: "one".into(),
                     resolved_identity_cwd: nested.clone(),
                     cache_key: repo.clone(),
+                    loaded_commit_count: 50,
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
                     resolved_identity_cwd: other.clone(),
                     cache_key: repo.clone(),
+                    loaded_commit_count: 50,
                 },
             ],
             &HashMap::new(),

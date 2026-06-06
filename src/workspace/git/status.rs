@@ -52,6 +52,7 @@ pub fn git_status_cache_key(cwd: &Path) -> Option<PathBuf> {
 pub fn git_status_snapshot_for_cwd(
     cwd: &Path,
     cached: Option<&GitStatusCacheEntry>,
+    commit_count: usize,
 ) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
     let space = git_space_metadata(cwd);
     let Some(fingerprint) = git_status_fingerprint(cwd) else {
@@ -60,17 +61,31 @@ pub fn git_status_snapshot_for_cwd(
                 branch: git_branch(cwd),
                 ahead_behind: None,
                 space,
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: false,
             },
             None,
         );
     };
     let branch = fingerprint.branch_name().map(str::to_string);
 
+    // The working tree and commit graph are not part of the fingerprint, so
+    // changed files and the log are recomputed on every refresh; only the
+    // (expensive) ahead/behind rev-list is short-circuited by the cache.
+    let changes = super::source_panel::changed_files_for_cwd(cwd);
+    let (log, log_has_more) = super::source_panel::commits_for_cwd(cwd, commit_count);
+
     if let Some(cached) = cached.filter(|entry| entry.fingerprint == fingerprint) {
         let snapshot = WorkspaceGitStatusSnapshot {
             branch,
             ahead_behind: cached.snapshot.ahead_behind,
             space,
+            changes,
+            log,
+            log_has_more,
+            is_git_repo: true,
         };
         return (
             snapshot.clone(),
@@ -89,6 +104,10 @@ pub fn git_status_snapshot_for_cwd(
         branch,
         ahead_behind,
         space,
+        changes,
+        log,
+        log_has_more,
+        is_git_repo: true,
     };
     (
         snapshot.clone(),
@@ -268,10 +287,14 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
                 space: git_space_metadata(&root),
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             },
         };
 
-        let (snapshot, update) = git_status_snapshot_for_cwd(&root, Some(&cached));
+        let (snapshot, update) = git_status_snapshot_for_cwd(&root, Some(&cached), 50);
 
         assert_eq!(snapshot.branch.as_deref(), Some("main"));
         assert_eq!(snapshot.ahead_behind, Some((2, 1)));
@@ -291,6 +314,10 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((4, 0)),
                 space: git_space_metadata(&root),
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             },
         };
         std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature\n").unwrap();
@@ -305,7 +332,7 @@ mod tests {
         )
         .unwrap();
 
-        let (snapshot, _) = git_status_snapshot_for_cwd(&root, Some(&cached));
+        let (snapshot, _) = git_status_snapshot_for_cwd(&root, Some(&cached), 50);
 
         assert_eq!(snapshot.branch.as_deref(), Some("feature"));
         assert_eq!(snapshot.ahead_behind, None);
@@ -324,11 +351,15 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 3)),
                 space: git_space_metadata(&root),
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             },
         };
         std::fs::write(root.join(".git/config"), "").unwrap();
 
-        let (snapshot, _) = git_status_snapshot_for_cwd(&root, Some(&cached));
+        let (snapshot, _) = git_status_snapshot_for_cwd(&root, Some(&cached), 50);
 
         assert_eq!(snapshot.branch.as_deref(), Some("main"));
         assert_eq!(snapshot.ahead_behind, None);
@@ -436,11 +467,11 @@ mod tests {
         run_git(&repo, &["remote", "add", "origin", &remote_arg]);
         run_git(&repo, &["push", "-u", "origin", "main"]);
 
-        let (initial, cache_entry) = git_status_snapshot_for_cwd(&repo, None);
+        let (initial, cache_entry) = git_status_snapshot_for_cwd(&repo, None, 50);
         assert_eq!(initial.ahead_behind, Some((0, 0)));
         run_git(&repo, &["commit", "--allow-empty", "-m", "ahead"]);
 
-        let (updated, _) = git_status_snapshot_for_cwd(&repo, cache_entry.as_ref());
+        let (updated, _) = git_status_snapshot_for_cwd(&repo, cache_entry.as_ref(), 50);
 
         assert_eq!(updated.branch.as_deref(), Some("main"));
         assert_eq!(updated.ahead_behind, Some((1, 0)));

@@ -304,6 +304,7 @@ pub struct Keybinds {
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
+    pub toggle_source_panel: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -490,6 +491,10 @@ impl Config {
             zoom: action!("keys.zoom", &self.keys.zoom),
             resize_mode: action!("keys.resize_mode", &self.keys.resize_mode),
             toggle_sidebar: action!("keys.toggle_sidebar", &self.keys.toggle_sidebar),
+            toggle_source_panel: action!(
+                "keys.toggle_source_panel",
+                &self.keys.toggle_source_panel
+            ),
             custom_commands: Vec::new(),
         };
 
@@ -1309,6 +1314,18 @@ next_tab = "prefix+n"
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('g'),
                 KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn toggle_source_panel_defaults_to_prefix_shift_s() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.toggle_source_panel),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('s'),
+                KeyModifiers::SHIFT
             ))]
         );
     }

@@ -31,6 +31,7 @@ mod overlays;
 mod selection;
 mod settings;
 mod sidebar;
+mod source_panel;
 mod terminal;
 
 pub(crate) use self::{

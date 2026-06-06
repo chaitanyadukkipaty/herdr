@@ -412,6 +412,7 @@ impl App {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_source_panel_git_refresh: false,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -455,6 +456,15 @@ impl App {
             view: state::ViewState {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                source_panel_rect: Rect::default(),
+                source_panel_toggle_rect: Rect::default(),
+                source_panel_section_divider_rect: Rect::default(),
+                source_panel_changes_card_areas: Vec::new(),
+                source_panel_changes_refresh_rect: Rect::default(),
+                source_panel_log_card_areas: Vec::new(),
+                source_panel_commit_file_card_areas: Vec::new(),
+                source_panel_log_refresh_rect: Rect::default(),
+                source_panel_load_more_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -494,6 +504,20 @@ impl App {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split,
+            default_source_panel_width: config.ui.source_panel_width,
+            source_panel_width: config.ui.source_panel_width,
+            source_panel_min_width: state::SOURCE_PANEL_MIN_WIDTH,
+            source_panel_max_width: state::SOURCE_PANEL_MAX_WIDTH,
+            source_panel_width_source: state::SourcePanelWidthSource::ConfigDefault,
+            source_panel_collapsed: config.ui.source_panel_collapsed,
+            source_panel_section_split: config.ui.source_panel_section_split,
+            source_panel_changes_scroll: 0,
+            source_panel_log_scroll: 0,
+            source_panel_diff_pane: None,
+            source_panel_expanded_commits: std::collections::HashSet::new(),
+            source_panel_commit_files: std::collections::HashMap::new(),
+            source_panel_active_item: None,
+            suppress_pane_death: std::collections::HashSet::new(),
             agent_panel_scope,
             mouse_capture: config.ui.mouse_capture,
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
@@ -759,6 +783,12 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 self.create_tab();
+                needs_render = true;
+            }
+
+            if self.state.request_source_panel_git_refresh {
+                self.state.request_source_panel_git_refresh = false;
+                self.mark_git_status_refresh_due(now);
                 needs_render = true;
             }
 
@@ -1181,6 +1211,16 @@ impl App {
                     .state
                     .sidebar_width
                     .clamp(self.state.sidebar_min_width, self.state.sidebar_max_width);
+                self.state.default_source_panel_width = config.ui.source_panel_width;
+                if self.state.source_panel_width_source
+                    == state::SourcePanelWidthSource::ConfigDefault
+                {
+                    self.state.source_panel_width = config.ui.source_panel_width;
+                }
+                self.state.source_panel_width = self.state.source_panel_width.clamp(
+                    self.state.source_panel_min_width,
+                    self.state.source_panel_max_width,
+                );
                 self.state.mouse_capture = config.ui.mouse_capture;
                 if self.state.redraw_on_focus_gained != config.ui.redraw_on_focus_gained {
                     self.state.request_client_config_reload = true;
@@ -1713,6 +1753,10 @@ mod tests {
                 branch: Some("render-dirty-test".into()),
                 ahead_behind: Some((1, 0)),
                 space: None,
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             }],
             cache_updates: Vec::new(),
         });

@@ -1847,6 +1847,12 @@ impl PaneRuntime {
         if self.current_size.get() == size {
             return;
         }
+        debug!(
+            rows,
+            cols,
+            prev = ?self.current_size.get(),
+            "pane runtime resize (child SIGWINCH)"
+        );
         self.current_size.set(size);
         let terminal_responses = self
             .terminal
