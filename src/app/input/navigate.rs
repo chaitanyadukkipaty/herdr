@@ -514,6 +514,7 @@ pub(crate) enum NavigateAction {
     Zoom,
     EnterResizeMode,
     ToggleSidebar,
+    ToggleSourcePanel,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -621,6 +622,7 @@ fn action_for_key(
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
+        (&kb.toggle_source_panel, NavigateAction::ToggleSourcePanel),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -827,6 +829,10 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::EnterResizeMode => state.mode = Mode::Resize,
         NavigateAction::ToggleSidebar => {
             state.sidebar_collapsed = !state.sidebar_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleSourcePanel => {
+            state.source_panel_collapsed = !state.source_panel_collapsed;
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {
@@ -1258,6 +1264,21 @@ mod tests {
         );
 
         assert!(state.sidebar_collapsed);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn toggle_source_panel_action_flips_collapsed_and_exits_navigate() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.toggle_source_panel = crate::config::ActionKeybinds::prefix("g");
+        assert!(!state.source_panel_collapsed);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert!(state.source_panel_collapsed);
         assert_eq!(state.mode, Mode::Terminal);
     }
 

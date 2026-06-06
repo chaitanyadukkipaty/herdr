@@ -16,6 +16,7 @@ mod release_notes;
 mod scrollbar;
 mod settings;
 mod sidebar;
+mod source_panel;
 mod status;
 mod tabs;
 mod widgets;
@@ -50,6 +51,17 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
+pub(crate) use self::source_panel::{
+    collapsed_source_panel_toggle_rect, compute_source_panel_changes_card_areas,
+    compute_source_panel_commit_file_card_areas, compute_source_panel_load_more_rect,
+    compute_source_panel_log_card_areas, expanded_source_panel_toggle_rect,
+    source_panel_changes_rect, source_panel_changes_refresh_rect,
+    source_panel_changes_scroll_metrics, source_panel_graph_rect, source_panel_log_refresh_rect,
+    source_panel_log_scroll_metrics, source_panel_section_divider_rect, source_panel_workspace_idx,
+};
+use self::source_panel::{
+    render_source_panel, render_source_panel_collapsed, source_panel_is_git_repo,
+};
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
     toast_notification_rect,
@@ -89,6 +101,7 @@ use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
 const COLLAPSED_WIDTH: u16 = 4; // num + space + dot + separator
+const COLLAPSED_SOURCE_PANEL_WIDTH: u16 = 3; // separator + toggle strip
 
 // Braille spinner frames — smooth rotation
 const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -184,8 +197,46 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(sidebar_w), Constraint::Min(1)]).areas(area);
+    // A source-control panel only has anything to show for a git workspace.
+    // When the active workspace is not a repository, keep the panel at its
+    // collapsed strip width so it doesn't steal columns from the terminal for an
+    // empty placeholder. The user can still toggle it explicitly.
+    let source_panel_collapsed = app.source_panel_collapsed || !source_panel_is_git_repo(app);
+
+    let source_panel_w = if source_panel_collapsed {
+        COLLAPSED_SOURCE_PANEL_WIDTH
+    } else {
+        app.source_panel_width
+            .clamp(app.source_panel_min_width, app.source_panel_max_width)
+    };
+
+    let [sidebar_area, main_area, source_panel_area] = Layout::horizontal([
+        Constraint::Length(sidebar_w),
+        Constraint::Min(1),
+        Constraint::Length(source_panel_w),
+    ])
+    .areas(area);
+
+    let source_panel_toggle_rect = if source_panel_collapsed {
+        collapsed_source_panel_toggle_rect(source_panel_area)
+    } else {
+        expanded_source_panel_toggle_rect(source_panel_area)
+    };
+    let source_panel_section_divider_rect = if source_panel_collapsed {
+        Rect::default()
+    } else {
+        source_panel_section_divider_rect(source_panel_area, app.source_panel_section_split)
+    };
+    let source_panel_changes_refresh_rect = if source_panel_collapsed {
+        Rect::default()
+    } else {
+        source_panel_changes_refresh_rect(source_panel_area, app.source_panel_section_split)
+    };
+    let source_panel_log_refresh_rect = if source_panel_collapsed {
+        Rect::default()
+    } else {
+        source_panel_log_refresh_rect(source_panel_area, app.source_panel_section_split)
+    };
 
     let has_tabs = app.active.and_then(|i| app.workspaces.get(i)).is_some();
     let (tab_bar_rect, terminal_area) = if has_tabs && main_area.height > 1 {
@@ -213,6 +264,29 @@ fn compute_view_internal(
     } else {
         compute_workspace_card_areas(app, sidebar_area)
     };
+
+    if source_panel_collapsed {
+        app.source_panel_changes_scroll = 0;
+        app.source_panel_log_scroll = 0;
+    } else {
+        let changes_section =
+            source_panel_changes_rect(source_panel_area, app.source_panel_section_split);
+        let max_changes_scroll =
+            source_panel_changes_scroll_metrics(app, changes_section).max_offset_from_bottom;
+        app.source_panel_changes_scroll = app.source_panel_changes_scroll.min(max_changes_scroll);
+
+        let graph_section =
+            source_panel_graph_rect(source_panel_area, app.source_panel_section_split);
+        let max_log_scroll =
+            source_panel_log_scroll_metrics(app, graph_section).max_offset_from_bottom;
+        app.source_panel_log_scroll = app.source_panel_log_scroll.min(max_log_scroll);
+    }
+    let source_panel_changes_card_areas =
+        compute_source_panel_changes_card_areas(app, source_panel_area);
+    let source_panel_log_card_areas = compute_source_panel_log_card_areas(app, source_panel_area);
+    let source_panel_commit_file_card_areas =
+        compute_source_panel_commit_file_card_areas(app, source_panel_area);
+    let source_panel_load_more_rect = compute_source_panel_load_more_rect(app, source_panel_area);
 
     let tab_bar_view = app
         .active
@@ -267,6 +341,15 @@ fn compute_view_internal(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Desktop,
         sidebar_rect: sidebar_area,
+        source_panel_rect: source_panel_area,
+        source_panel_toggle_rect,
+        source_panel_section_divider_rect,
+        source_panel_changes_card_areas,
+        source_panel_changes_refresh_rect,
+        source_panel_log_card_areas,
+        source_panel_commit_file_card_areas,
+        source_panel_log_refresh_rect,
+        source_panel_load_more_rect,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -336,6 +419,15 @@ fn compute_mobile_view(
     app.view = crate::app::ViewState {
         layout: ViewLayout::Mobile,
         sidebar_rect: Rect::default(),
+        source_panel_rect: Rect::default(),
+        source_panel_toggle_rect: Rect::default(),
+        source_panel_section_divider_rect: Rect::default(),
+        source_panel_changes_card_areas: Vec::new(),
+        source_panel_changes_refresh_rect: Rect::default(),
+        source_panel_log_card_areas: Vec::new(),
+        source_panel_commit_file_card_areas: Vec::new(),
+        source_panel_log_refresh_rect: Rect::default(),
+        source_panel_load_more_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
@@ -376,6 +468,19 @@ pub fn render_with_runtime_registry(
     }
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
+        let source_panel_area = app.view.source_panel_rect;
+        if source_panel_area.width > 0 {
+            // Mirror the layout's effective-collapsed decision: a non-git
+            // workspace renders the collapsed strip even when not explicitly
+            // collapsed, matching the width reserved in compute_view_internal.
+            let source_panel_collapsed =
+                app.source_panel_collapsed || !source_panel_is_git_repo(app);
+            if source_panel_collapsed {
+                render_source_panel_collapsed(app, frame, source_panel_area);
+            } else {
+                render_source_panel(app, frame, source_panel_area);
+            }
+        }
     }
     render_panes(app, terminal_runtimes, frame, terminal_area);
 
@@ -772,6 +877,50 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 100, 20));
 
         assert_eq!(app.view.sidebar_rect.width, 22);
+    }
+
+    #[test]
+    fn compute_view_clamps_source_panel_width_to_configured_max() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.source_panel_max_width = 30;
+        app.source_panel_width = 999;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 20));
+
+        assert_eq!(app.view.source_panel_rect.width, 30);
+    }
+
+    #[test]
+    fn compute_view_clamps_source_panel_width_to_configured_min() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.source_panel_min_width = 22;
+        app.source_panel_width = 5;
+
+        compute_view(&mut app, Rect::new(0, 0, 120, 20));
+
+        assert_eq!(app.view.source_panel_rect.width, 22);
+    }
+
+    #[test]
+    fn mobile_layout_hides_source_panel() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+
+        compute_view(&mut app, Rect::new(0, 0, 44, 20));
+
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        assert_eq!(app.view.source_panel_rect, Rect::default());
     }
 
     #[test]
@@ -1195,6 +1344,26 @@ mod tests {
         assert!(panes
             .iter()
             .any(|(key, label)| key == "prefix+l" && label.as_ref() == "focus pane right"));
+    }
+
+    #[test]
+    fn keybind_help_lists_toggle_source_panel() {
+        let app = crate::app::state::AppState::test_new();
+        let groups = keybind_help_groups(&app);
+
+        let panes = groups
+            .iter()
+            .find(|(name, _)| *name == "panes")
+            .expect("panes group")
+            .1
+            .clone();
+
+        assert!(
+            panes
+                .iter()
+                .any(|(_, label)| label.as_ref() == "toggle source panel"),
+            "panes group should list the source panel toggle: {panes:?}"
+        );
     }
 
     #[test]

@@ -2312,6 +2312,12 @@ impl PaneRuntime {
             return;
         }
         self.input_write_seq.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            rows,
+            cols,
+            prev = ?self.current_size.get(),
+            "pane runtime resize (child SIGWINCH)"
+        );
         self.current_size.set(size);
         let terminal_responses = self
             .terminal

@@ -144,6 +144,13 @@ impl AppState {
             && mouse.row >= sidebar.y
             && mouse.row < sidebar.y + sidebar.height;
 
+        let source_panel = self.view.source_panel_rect;
+        let in_source_panel = source_panel.width > 0
+            && mouse.column >= source_panel.x
+            && mouse.column < source_panel.x + source_panel.width
+            && mouse.row >= source_panel.y
+            && mouse.row < source_panel.y + source_panel.height;
+
         if self.handle_right_click_passthrough(terminal_runtimes, mouse, in_sidebar) {
             return None;
         }
@@ -388,6 +395,71 @@ impl AppState {
                         target: DragTarget::SidebarSectionDivider,
                     });
                     self.set_sidebar_section_split(mouse.row);
+                    return None;
+                }
+
+                if self.on_source_panel_resize_edge(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::SourcePanelResize {
+                            start_x: mouse.column,
+                            start_width: self
+                                .source_panel_width
+                                .clamp(self.source_panel_min_width, self.source_panel_max_width),
+                        },
+                    });
+                    return None;
+                }
+
+                if self.on_source_panel_section_divider(mouse.column, mouse.row) {
+                    self.drag = Some(DragState {
+                        target: DragTarget::SourcePanelSectionResize {
+                            start_y: mouse.row,
+                            start_ratio: self.source_panel_section_split,
+                        },
+                    });
+                    return None;
+                }
+
+                if in_source_panel {
+                    if self.on_source_panel_toggle(mouse.column, mouse.row) {
+                        self.source_panel_collapsed = !self.source_panel_collapsed;
+                    } else if self.on_source_panel_changes_refresh(mouse.column, mouse.row)
+                        || self.on_source_panel_log_refresh(mouse.column, mouse.row)
+                    {
+                        self.request_source_panel_git_refresh = true;
+                    } else if self.on_source_panel_load_more(mouse.column, mouse.row) {
+                        if let Some(ws_idx) = crate::ui::source_panel_workspace_idx(self) {
+                            self.load_more_commits(ws_idx);
+                        }
+                    } else if let Some((log_idx, file_idx)) =
+                        self.source_panel_commit_file_at(mouse.column, mouse.row)
+                    {
+                        if let Some(ws_idx) = crate::ui::source_panel_workspace_idx(self) {
+                            self.open_commit_file_diff(
+                                terminal_runtimes,
+                                ws_idx,
+                                log_idx,
+                                file_idx,
+                            );
+                        }
+                    } else if let Some(change_idx) =
+                        self.source_panel_changed_file_at(mouse.column, mouse.row)
+                    {
+                        if let Some(ws_idx) = crate::ui::source_panel_workspace_idx(self) {
+                            self.open_changed_file_diff(terminal_runtimes, ws_idx, change_idx);
+                        }
+                    } else if let Some(log_idx) =
+                        self.source_panel_commit_at(mouse.column, mouse.row)
+                    {
+                        if let Some(ws_idx) = crate::ui::source_panel_workspace_idx(self) {
+                            self.click_source_panel_commit(
+                                terminal_runtimes,
+                                ws_idx,
+                                log_idx,
+                                mouse.column,
+                            );
+                        }
+                    }
                     return None;
                 }
 
@@ -735,6 +807,26 @@ impl AppState {
                         DragTarget::SidebarSectionDivider => {
                             self.set_sidebar_section_split(mouse.row);
                         }
+                        DragTarget::SourcePanelResize {
+                            start_x,
+                            start_width,
+                        } => {
+                            self.set_source_panel_width_from_drag(
+                                *start_x,
+                                *start_width,
+                                mouse.column,
+                            );
+                        }
+                        DragTarget::SourcePanelSectionResize {
+                            start_y,
+                            start_ratio,
+                        } => {
+                            self.set_source_panel_section_split_from_drag(
+                                *start_y,
+                                *start_ratio,
+                                mouse.row,
+                            );
+                        }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
@@ -833,6 +925,13 @@ impl AppState {
                     MouseEventKind::ScrollDown => self.next_tab(),
                     _ => {}
                 }
+            }
+
+            MouseEventKind::ScrollUp if in_source_panel => {
+                self.scroll_source_panel_section_at(mouse.column, mouse.row, -1);
+            }
+            MouseEventKind::ScrollDown if in_source_panel => {
+                self.scroll_source_panel_section_at(mouse.column, mouse.row, 1);
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
