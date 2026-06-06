@@ -455,11 +455,22 @@ fn render_source_panel_toggle(frame: &mut Frame, area: Rect, collapsed: bool, p:
 /// Whether the panel's current workspace is a git repository. Defaults to true
 /// when no workspace is selected, so the panel only shows its non-git empty
 /// state for a workspace we have positively determined is not a repo.
-pub(super) fn source_panel_is_git_repo(app: &AppState) -> bool {
+fn source_panel_is_git_repo(app: &AppState) -> bool {
     source_panel_workspace_idx(app)
         .and_then(|idx| app.workspaces.get(idx))
         .map(|ws| ws.is_git_repo())
         .unwrap_or(true)
+}
+
+/// Whether the panel has a git workspace worth reserving columns for. Unlike
+/// [`source_panel_is_git_repo`], this is `false` when no workspace is selected:
+/// an absent or non-git workspace has nothing to show, so the layout hides the
+/// panel entirely rather than reserving columns for an empty placeholder.
+pub(super) fn source_panel_has_git_workspace(app: &AppState) -> bool {
+    source_panel_workspace_idx(app)
+        .and_then(|idx| app.workspaces.get(idx))
+        .map(|ws| ws.is_git_repo())
+        .unwrap_or(false)
 }
 
 /// Expanded source control panel: left separator, the changes and graph

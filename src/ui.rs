@@ -60,7 +60,7 @@ pub(crate) use self::source_panel::{
     source_panel_log_scroll_metrics, source_panel_section_divider_rect, source_panel_workspace_idx,
 };
 use self::source_panel::{
-    render_source_panel, render_source_panel_collapsed, source_panel_is_git_repo,
+    render_source_panel, render_source_panel_collapsed, source_panel_has_git_workspace,
 };
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
@@ -197,13 +197,16 @@ fn compute_view_internal(
             .clamp(app.sidebar_min_width, app.sidebar_max_width)
     };
 
-    // A source-control panel only has anything to show for a git workspace.
-    // When the active workspace is not a repository, keep the panel at its
-    // collapsed strip width so it doesn't steal columns from the terminal for an
-    // empty placeholder. The user can still toggle it explicitly.
-    let source_panel_collapsed = app.source_panel_collapsed || !source_panel_is_git_repo(app);
+    // A source-control panel only has anything to show for a git workspace. When
+    // the active workspace is not a repository (or there is none), hide the panel
+    // entirely so it doesn't steal columns from the terminal for an empty
+    // placeholder. For a git workspace it honors the explicit collapse toggle.
+    let source_panel_git = source_panel_has_git_workspace(app);
+    let source_panel_collapsed = !source_panel_git || app.source_panel_collapsed;
 
-    let source_panel_w = if source_panel_collapsed {
+    let source_panel_w = if !source_panel_git {
+        0
+    } else if app.source_panel_collapsed {
         COLLAPSED_SOURCE_PANEL_WIDTH
     } else {
         app.source_panel_width
@@ -469,13 +472,11 @@ pub fn render_with_runtime_registry(
     if app.view.layout != ViewLayout::Mobile {
         render_tab_bar(app, frame, tab_bar_area);
         let source_panel_area = app.view.source_panel_rect;
+        // The layout only reserves columns for a git workspace, so a non-zero
+        // width here means the panel is visible; collapse is then just the
+        // explicit toggle.
         if source_panel_area.width > 0 {
-            // Mirror the layout's effective-collapsed decision: a non-git
-            // workspace renders the collapsed strip even when not explicitly
-            // collapsed, matching the width reserved in compute_view_internal.
-            let source_panel_collapsed =
-                app.source_panel_collapsed || !source_panel_is_git_repo(app);
-            if source_panel_collapsed {
+            if app.source_panel_collapsed {
                 render_source_panel_collapsed(app, frame, source_panel_area);
             } else {
                 render_source_panel(app, frame, source_panel_area);
