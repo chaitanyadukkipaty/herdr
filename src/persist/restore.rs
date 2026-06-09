@@ -340,6 +340,11 @@ fn restore_workspace(
             next_public_pane_number,
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
             tabs,
+            // Source-panel mode and its Explorer scroll/selection are runtime-only
+            // and reset to defaults on restore (not persisted).
+            source_panel_mode: crate::workspace::SourcePanelMode::Source,
+            explorer_scroll: 0,
+            explorer_selected: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })

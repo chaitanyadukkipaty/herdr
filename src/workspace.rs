@@ -31,6 +31,27 @@ pub use self::{
     tab::Tab,
 };
 
+/// Which of the source panel's two mutually-exclusive modes is showing for a
+/// workspace. `Source` keeps the Changes-over-Graph git layout; `Explorer`
+/// renders the workspace's file tree. Runtime-only: resets to `Source` on
+/// launch and is never persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourcePanelMode {
+    #[default]
+    Source,
+    Explorer,
+}
+
+impl SourcePanelMode {
+    /// The other mode — used by the mode toggle.
+    pub fn toggled(self) -> Self {
+        match self {
+            SourcePanelMode::Source => SourcePanelMode::Explorer,
+            SourcePanelMode::Explorer => SourcePanelMode::Source,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeSpaceMembership {
     pub key: String,
@@ -130,6 +151,17 @@ pub struct Workspace {
     pub(crate) next_public_pane_number: usize,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Which source-panel mode (Source / Explorer) is showing for this
+    /// workspace. Runtime-only; resets to `Source` on launch (not persisted).
+    pub(crate) source_panel_mode: SourcePanelMode,
+    // Explorer mode's own scroll offset and selection, kept separate from the
+    // Source mode scroll/selection so switching modes never disturbs the other's
+    // place. Populated and consumed by the Explorer tree slice; held here now so
+    // the two modes' view state is provably independent.
+    #[allow(dead_code)]
+    pub(crate) explorer_scroll: usize,
+    #[allow(dead_code)]
+    pub(crate) explorer_selected: Option<usize>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -261,6 +293,9 @@ impl Workspace {
                 next_public_pane_number: 2,
                 tabs: vec![tab],
                 active_tab: 0,
+                source_panel_mode: SourcePanelMode::Source,
+                explorer_scroll: 0,
+                explorer_selected: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -691,6 +726,21 @@ impl Workspace {
             .unwrap_or_else(|| "workspace".into())
     }
 
+    /// The source panel mode currently showing for this workspace.
+    pub fn source_panel_mode(&self) -> SourcePanelMode {
+        self.source_panel_mode
+    }
+
+    /// Switch this workspace's source panel to `mode`.
+    pub fn set_source_panel_mode(&mut self, mode: SourcePanelMode) {
+        self.source_panel_mode = mode;
+    }
+
+    /// Flip this workspace's source panel between Source and Explorer.
+    pub fn toggle_source_panel_mode(&mut self) {
+        self.source_panel_mode = self.source_panel_mode.toggled();
+    }
+
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
     }
@@ -868,6 +918,9 @@ impl Workspace {
             next_public_pane_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            source_panel_mode: SourcePanelMode::Source,
+            explorer_scroll: 0,
+            explorer_selected: None,
             test_runtimes: HashMap::new(),
         }
     }
@@ -913,6 +966,21 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_panel_mode_defaults_to_source_on_launch() {
+        let ws = Workspace::test_new("ws");
+        assert_eq!(ws.source_panel_mode(), SourcePanelMode::Source);
+    }
+
+    #[test]
+    fn toggling_source_panel_mode_alternates_between_the_two_modes() {
+        let mut ws = Workspace::test_new("ws");
+        ws.toggle_source_panel_mode();
+        assert_eq!(ws.source_panel_mode(), SourcePanelMode::Explorer);
+        ws.toggle_source_panel_mode();
+        assert_eq!(ws.source_panel_mode(), SourcePanelMode::Source);
+    }
 
     #[test]
     fn workspace_identity_follows_first_tab_root_pane_cwd() {

@@ -54,10 +54,11 @@ use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 pub(crate) use self::source_panel::{
     collapsed_source_panel_toggle_rect, compute_source_panel_changes_card_areas,
     compute_source_panel_commit_file_card_areas, compute_source_panel_load_more_rect,
-    compute_source_panel_log_card_areas, expanded_source_panel_toggle_rect,
-    source_panel_changes_rect, source_panel_changes_refresh_rect,
-    source_panel_changes_scroll_metrics, source_panel_graph_rect, source_panel_log_refresh_rect,
-    source_panel_log_scroll_metrics, source_panel_section_divider_rect, source_panel_workspace_idx,
+    compute_source_panel_log_card_areas, compute_source_panel_mode_tab_areas,
+    expanded_source_panel_toggle_rect, source_panel_changes_rect,
+    source_panel_changes_refresh_rect, source_panel_changes_scroll_metrics,
+    source_panel_graph_rect, source_panel_log_refresh_rect, source_panel_log_scroll_metrics,
+    source_panel_section_divider_rect, source_panel_workspace_idx,
 };
 use self::source_panel::{
     render_source_panel, render_source_panel_collapsed, source_panel_has_git_workspace,
@@ -284,6 +285,11 @@ fn compute_view_internal(
             source_panel_log_scroll_metrics(app, graph_section).max_offset_from_bottom;
         app.source_panel_log_scroll = app.source_panel_log_scroll.min(max_log_scroll);
     }
+    let source_panel_mode_tab_areas = if source_panel_collapsed {
+        Vec::new()
+    } else {
+        compute_source_panel_mode_tab_areas(source_panel_area)
+    };
     let source_panel_changes_card_areas =
         compute_source_panel_changes_card_areas(app, source_panel_area);
     let source_panel_log_card_areas = compute_source_panel_log_card_areas(app, source_panel_area);
@@ -346,6 +352,7 @@ fn compute_view_internal(
         sidebar_rect: sidebar_area,
         source_panel_rect: source_panel_area,
         source_panel_toggle_rect,
+        source_panel_mode_tab_areas,
         source_panel_section_divider_rect,
         source_panel_changes_card_areas,
         source_panel_changes_refresh_rect,
@@ -424,6 +431,7 @@ fn compute_mobile_view(
         sidebar_rect: Rect::default(),
         source_panel_rect: Rect::default(),
         source_panel_toggle_rect: Rect::default(),
+        source_panel_mode_tab_areas: Vec::new(),
         source_panel_section_divider_rect: Rect::default(),
         source_panel_changes_card_areas: Vec::new(),
         source_panel_changes_refresh_rect: Rect::default(),

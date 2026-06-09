@@ -14,6 +14,54 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 }
 
 impl AppState {
+    /// The source panel mode of the workspace the panel currently reflects.
+    /// Defaults to `Source` when no workspace is selected.
+    pub(crate) fn source_panel_mode(&self) -> crate::workspace::SourcePanelMode {
+        crate::ui::source_panel_workspace_idx(self)
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|ws| ws.source_panel_mode())
+            .unwrap_or_default()
+    }
+
+    /// The target [`SourcePanelMode`] of the header mode-tab under `(col, row)`,
+    /// if the click landed on one of the segmented-control labels.
+    pub(super) fn source_panel_mode_tab_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::workspace::SourcePanelMode> {
+        if self.source_panel_collapsed {
+            return None;
+        }
+        self.view
+            .source_panel_mode_tab_areas
+            .iter()
+            .find(|area| rect_contains(area.rect, col, row))
+            .map(|area| area.mode)
+    }
+
+    /// Switch the panel's current workspace to `mode`.
+    pub(crate) fn set_source_panel_mode(&mut self, mode: crate::workspace::SourcePanelMode) {
+        let Some(idx) = crate::ui::source_panel_workspace_idx(self) else {
+            return;
+        };
+        if let Some(ws) = self.workspaces.get_mut(idx) {
+            ws.set_source_panel_mode(mode);
+        }
+    }
+
+    /// Flip the panel's current workspace between Source and Explorer. Panel
+    /// width and collapse state are stored on `AppState` and untouched here, so
+    /// switching modes never disturbs the panel's layout.
+    pub(crate) fn toggle_source_panel_mode(&mut self) {
+        let Some(idx) = crate::ui::source_panel_workspace_idx(self) else {
+            return;
+        };
+        if let Some(ws) = self.workspaces.get_mut(idx) {
+            ws.toggle_source_panel_mode();
+        }
+    }
+
     /// The Changes section rect within the source panel, or default when the
     /// panel is collapsed/absent.
     pub(super) fn source_panel_changes_rect(&self) -> Rect {
@@ -592,6 +640,121 @@ impl AppState {
 mod tests {
     use super::*;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn mode_tab_hit_test_maps_header_click_to_target_mode() {
+        use crate::app::state::SourcePanelModeTabArea;
+        use crate::workspace::SourcePanelMode;
+        let mut app = AppState::test_new();
+        app.view.source_panel_mode_tab_areas = vec![
+            SourcePanelModeTabArea {
+                rect: Rect::new(71, 0, 8, 1),
+                mode: SourcePanelMode::Source,
+            },
+            SourcePanelModeTabArea {
+                rect: Rect::new(79, 0, 10, 1),
+                mode: SourcePanelMode::Explorer,
+            },
+        ];
+
+        assert_eq!(
+            app.source_panel_mode_tab_at(73, 0),
+            Some(SourcePanelMode::Source)
+        );
+        assert_eq!(
+            app.source_panel_mode_tab_at(82, 0),
+            Some(SourcePanelMode::Explorer)
+        );
+        assert_eq!(app.source_panel_mode_tab_at(73, 1), None); // wrong row
+        assert_eq!(app.source_panel_mode_tab_at(120, 0), None); // outside the tabs
+    }
+
+    #[test]
+    fn clicking_explorer_mode_tab_switches_mode() {
+        use crate::app::state::SourcePanelModeTabArea;
+        use crate::workspace::SourcePanelMode;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.workspaces = vec![crate::workspace::Workspace::test_new("ws")];
+        app.active = Some(0);
+        app.view.source_panel_rect = Rect::new(70, 0, 26, 20);
+        app.view.source_panel_mode_tab_areas = vec![
+            SourcePanelModeTabArea {
+                rect: Rect::new(71, 0, 8, 1),
+                mode: SourcePanelMode::Source,
+            },
+            SourcePanelModeTabArea {
+                rect: Rect::new(79, 0, 10, 1),
+                mode: SourcePanelMode::Explorer,
+            },
+        ];
+        let mut runtimes = TerminalRuntimeRegistry::new();
+
+        app.handle_mouse(
+            &mut runtimes,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 82,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::empty(),
+            },
+        );
+
+        assert_eq!(app.source_panel_mode(), SourcePanelMode::Explorer);
+    }
+
+    #[test]
+    fn toggle_source_panel_mode_flips_the_panel_workspaces_mode() {
+        use crate::workspace::SourcePanelMode;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("ws")];
+        app.active = Some(0);
+
+        assert_eq!(app.source_panel_mode(), SourcePanelMode::Source);
+        app.toggle_source_panel_mode();
+        assert_eq!(app.source_panel_mode(), SourcePanelMode::Explorer);
+        app.toggle_source_panel_mode();
+        assert_eq!(app.source_panel_mode(), SourcePanelMode::Source);
+    }
+
+    #[test]
+    fn each_mode_keeps_its_own_scroll_and_selection_across_a_switch() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("ws")];
+        app.active = Some(0);
+        // Source mode's scroll (held on AppState).
+        app.source_panel_changes_scroll = 5;
+        app.source_panel_log_scroll = 3;
+        // Explorer mode's own scroll/selection (held per-workspace).
+        app.workspaces[0].explorer_scroll = 9;
+        app.workspaces[0].explorer_selected = Some(2);
+
+        app.toggle_source_panel_mode(); // -> Explorer
+        app.toggle_source_panel_mode(); // -> Source
+
+        // Switching modes disturbs neither mode's scroll/selection — they live in
+        // separate fields rather than a shared one.
+        assert_eq!(app.source_panel_changes_scroll, 5);
+        assert_eq!(app.source_panel_log_scroll, 3);
+        assert_eq!(app.workspaces[0].explorer_scroll, 9);
+        assert_eq!(app.workspaces[0].explorer_selected, Some(2));
+    }
+
+    #[test]
+    fn panel_width_and_collapse_state_survive_mode_switches() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("ws")];
+        app.active = Some(0);
+        app.source_panel_width = 30;
+        app.source_panel_collapsed = false;
+
+        app.toggle_source_panel_mode();
+        app.toggle_source_panel_mode();
+
+        assert_eq!(app.source_panel_width, 30);
+        assert!(!app.source_panel_collapsed);
+    }
 
     #[test]
     fn width_drag_widens_when_dragging_left_edge_left() {

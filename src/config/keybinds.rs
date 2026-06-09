@@ -305,6 +305,7 @@ pub struct Keybinds {
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub toggle_source_panel: ActionKeybinds,
+    pub toggle_source_panel_mode: ActionKeybinds,
     pub custom_commands: Vec<CustomCommandKeybind>,
 }
 
@@ -494,6 +495,10 @@ impl Config {
             toggle_source_panel: action!(
                 "keys.toggle_source_panel",
                 &self.keys.toggle_source_panel
+            ),
+            toggle_source_panel_mode: action!(
+                "keys.toggle_source_panel_mode",
+                &self.keys.toggle_source_panel_mode
             ),
             custom_commands: Vec::new(),
         };
@@ -1325,6 +1330,18 @@ next_tab = "prefix+n"
             binding_triggers(&kb.toggle_source_panel),
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('s'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    #[test]
+    fn toggle_source_panel_mode_defaults_to_prefix_shift_e() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.toggle_source_panel_mode),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('e'),
                 KeyModifiers::SHIFT
             ))]
         );

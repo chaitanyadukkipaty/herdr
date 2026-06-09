@@ -574,6 +574,14 @@ pub struct SourcePanelFileArea {
     pub change_idx: usize,
 }
 
+/// A clickable label of the source-panel header's mode segmented control. Each
+/// label maps its rect to the [`SourcePanelMode`] it activates when clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePanelModeTabArea {
+    pub rect: Rect,
+    pub mode: crate::workspace::SourcePanelMode,
+}
+
 /// A clickable commit row in the source-control panel's Graph section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePanelCommitArea {
@@ -762,6 +770,8 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     pub source_panel_rect: Rect,
     pub source_panel_toggle_rect: Rect,
+    /// Clickable mode labels (Source / Explorer) in the panel header.
+    pub source_panel_mode_tab_areas: Vec<SourcePanelModeTabArea>,
     /// The draggable divider between the Changes and Graph sections.
     pub source_panel_section_divider_rect: Rect,
     pub source_panel_changes_card_areas: Vec<SourcePanelFileArea>,
@@ -1733,6 +1743,7 @@ impl AppState {
                 sidebar_rect: Rect::default(),
                 source_panel_rect: Rect::default(),
                 source_panel_toggle_rect: Rect::default(),
+                source_panel_mode_tab_areas: Vec::new(),
                 source_panel_section_divider_rect: Rect::default(),
                 source_panel_changes_card_areas: Vec::new(),
                 source_panel_changes_refresh_rect: Rect::default(),

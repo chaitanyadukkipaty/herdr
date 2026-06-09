@@ -9,11 +9,20 @@ use ratatui::{
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use crate::app::state::{
     Palette, SourcePanelActiveItem, SourcePanelCommitArea, SourcePanelCommitFileArea,
-    SourcePanelFileArea,
+    SourcePanelFileArea, SourcePanelModeTabArea,
 };
 use crate::app::{AppState, Mode};
 use crate::pane::ScrollMetrics;
-use crate::workspace::{ChangeStatus, ChangedFile, CommitInfo};
+use crate::workspace::{ChangeStatus, ChangedFile, CommitInfo, SourcePanelMode};
+
+/// The mode-label texts of the header segmented control, in display order.
+const SOURCE_PANEL_MODE_TABS: [(SourcePanelMode, &str); 2] = [
+    (SourcePanelMode::Source, "Source"),
+    (SourcePanelMode::Explorer, "Explorer"),
+];
+
+/// Rows the panel reserves at the top for the mode segmented control header.
+const SOURCE_PANEL_HEADER_ROWS: u16 = 1;
 
 /// Rows the Changes section reserves for its header before the file list.
 const CHANGES_HEADER_ROWS: u16 = 1;
@@ -53,6 +62,62 @@ fn source_panel_content(area: Rect) -> Rect {
     )
 }
 
+/// The 1-row header at the top of the panel content where the mode segmented
+/// control is drawn. Shared by both Source and Explorer modes.
+pub(crate) fn source_panel_mode_header_rect(area: Rect) -> Rect {
+    let content = source_panel_content(area);
+    if content.width == 0 || content.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        SOURCE_PANEL_HEADER_ROWS,
+    )
+}
+
+/// The panel content below the mode header — the area both modes render their
+/// bodies into (Source's two sections, or the Explorer tree).
+pub(crate) fn source_panel_body_rect(area: Rect) -> Rect {
+    let content = source_panel_content(area);
+    if content.width == 0 || content.height <= SOURCE_PANEL_HEADER_ROWS {
+        return Rect::default();
+    }
+    Rect::new(
+        content.x,
+        content.y + SOURCE_PANEL_HEADER_ROWS,
+        content.width,
+        content.height - SOURCE_PANEL_HEADER_ROWS,
+    )
+}
+
+/// Clickable rects for the header's two mode labels, laid out left to right.
+/// Each label is rendered as `" <name> "`, so its hit-target includes the
+/// surrounding padding cells.
+pub(crate) fn compute_source_panel_mode_tab_areas(area: Rect) -> Vec<SourcePanelModeTabArea> {
+    let header = source_panel_mode_header_rect(area);
+    if header.width == 0 || header.height == 0 {
+        return Vec::new();
+    }
+    let right = header.x + header.width;
+    let mut x = header.x;
+    let mut areas = Vec::new();
+    for (mode, label) in SOURCE_PANEL_MODE_TABS {
+        if x >= right {
+            break;
+        }
+        let want = label.chars().count() as u16 + 2;
+        let w = want.min(right - x);
+        areas.push(SourcePanelModeTabArea {
+            rect: Rect::new(x, header.y, w, 1),
+            mode,
+        });
+        x += w;
+    }
+    areas
+}
+
 /// Whether the panel is tall enough to set aside a dedicated 1-row divider
 /// between the changes and graph sections (mirrors `source_panel_section_heights`
 /// reserving a full split only above this height).
@@ -64,7 +129,7 @@ fn source_panel_has_section_divider(content_height: u16) -> bool {
 /// is tall enough, a 1-row divider is carved from the top of the graph section
 /// so the two lists read as visually separate.
 pub(crate) fn expanded_source_panel_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let content = source_panel_content(area);
+    let content = source_panel_body_rect(area);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
     }
@@ -84,7 +149,7 @@ pub(crate) fn expanded_source_panel_sections(area: Rect, split_ratio: f32) -> (R
 
 /// The 1-row divider between the changes and graph sections.
 pub(crate) fn source_panel_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
-    let content = source_panel_content(area);
+    let content = source_panel_body_rect(area);
     if content.width == 0 || !source_panel_has_section_divider(content.height) {
         return Rect::default();
     }
@@ -480,16 +545,73 @@ pub(super) fn render_source_panel(app: &AppState, frame: &mut Frame, area: Rect)
     render_left_separator(frame, area, p);
 
     if source_panel_is_git_repo(app) {
-        let (changes_area, graph_area) =
-            expanded_source_panel_sections(area, app.source_panel_section_split);
-        render_source_panel_changes(app, frame, changes_area);
-        render_source_panel_section_divider(frame, area, app.source_panel_section_split, p);
-        render_source_panel_graph(app, frame, graph_area);
+        render_source_panel_mode_header(app, frame, area);
+        match app.source_panel_mode() {
+            SourcePanelMode::Source => {
+                let (changes_area, graph_area) =
+                    expanded_source_panel_sections(area, app.source_panel_section_split);
+                render_source_panel_changes(app, frame, changes_area);
+                render_source_panel_section_divider(frame, area, app.source_panel_section_split, p);
+                render_source_panel_graph(app, frame, graph_area);
+            }
+            SourcePanelMode::Explorer => render_source_panel_explorer(app, frame, area),
+        }
     } else {
         render_source_panel_non_git(app, frame, area);
     }
 
     render_source_panel_toggle(frame, area, false, p);
+}
+
+/// Draw the header's mode segmented control: a `Source` / `Explorer` pair of
+/// clickable labels with the active mode visually distinguished by a highlight
+/// background.
+fn render_source_panel_mode_header(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let active = app.source_panel_mode();
+    for tab in compute_source_panel_mode_tab_areas(area) {
+        if tab.rect.width == 0 {
+            continue;
+        }
+        let label = match tab.mode {
+            SourcePanelMode::Source => "Source",
+            SourcePanelMode::Explorer => "Explorer",
+        };
+        if tab.mode == active {
+            highlight_row(frame, tab.rect, p.surface0);
+        }
+        let style = if tab.mode == active {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!(" {label} "), style)),
+            tab.rect,
+        );
+    }
+}
+
+/// Explorer mode body: a header line showing the workspace name / cwd basename
+/// so the user knows which project's tree they are looking at, above an
+/// (empty) Explorer area. The tree itself lands in a later slice.
+fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let body = source_panel_body_rect(area);
+    if body.width == 0 || body.height == 0 {
+        return;
+    }
+    let name = source_panel_workspace_idx(app)
+        .and_then(|idx| app.workspaces.get(idx))
+        .map(|ws| ws.display_name())
+        .unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {name}"),
+            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(body.x, body.y, body.width, 1),
+    );
 }
 
 /// Draw the horizontal rule that separates the Changes and Graph sections,
@@ -896,23 +1018,28 @@ mod tests {
         let area = Rect::new(70, 0, 26, 20);
         let (changes, graph) = expanded_source_panel_sections(area, 0.5);
 
-        // Content starts one column in (past the left separator).
+        // Content starts one column in (past the left separator) and one row
+        // down (past the mode-tab header).
         assert_eq!(changes.x, area.x + 1);
         assert_eq!(changes.width, area.width - 1);
-        assert_eq!(changes.y, area.y);
+        assert_eq!(changes.y, area.y + SOURCE_PANEL_HEADER_ROWS);
         // A 1-row divider sits between the sections, so the graph starts one row
-        // below the changes section and the two cover all but that divider row.
+        // below the changes section and the two cover all but the header and
+        // divider rows.
         assert_eq!(graph.y, changes.y + changes.height + 1);
-        assert_eq!(changes.height + graph.height, area.height - 1);
+        assert_eq!(
+            changes.height + graph.height,
+            area.height - SOURCE_PANEL_HEADER_ROWS - 1
+        );
     }
 
     #[test]
     fn expanded_source_panel_sections_handle_tiny_heights() {
-        // Below the divider threshold the sections cover the full height with no
-        // dedicated divider row carved out.
+        // Below the divider threshold the sections cover the body height (the
+        // panel height minus the mode-tab header row) with no dedicated divider.
         let (changes, graph) = expanded_source_panel_sections(Rect::new(70, 0, 20, 5), 0.9);
         assert!(changes.height >= 1);
-        assert_eq!(changes.height + graph.height, 5);
+        assert_eq!(changes.height + graph.height, 5 - SOURCE_PANEL_HEADER_ROWS);
     }
 
     #[test]
@@ -947,14 +1074,94 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         // Left-edge separator.
         assert_eq!(buf[(area.x, area.y)].symbol(), "│");
-        // " changes" header on the first content row (starts past the separator).
-        let header: String = (area.x + 1..area.x + area.width)
+        // The mode segmented control occupies the top header row.
+        let mode_header: String = (area.x + 1..area.x + area.width)
             .map(|x| buf[(x, area.y)].symbol())
             .collect();
-        assert!(header.starts_with(" changes"), "header was {header:?}");
+        assert!(mode_header.contains("Source"), "header was {mode_header:?}");
+        assert!(
+            mode_header.contains("Explorer"),
+            "header was {mode_header:?}"
+        );
+        // " changes" header sits on the content row just below the mode header.
+        let changes_header: String = (area.x + 1..area.x + area.width)
+            .map(|x| buf[(x, area.y + SOURCE_PANEL_HEADER_ROWS)].symbol())
+            .collect();
+        assert!(
+            changes_header.starts_with(" changes"),
+            "changes header was {changes_header:?}"
+        );
         // Collapse toggle in the bottom-right corner.
         let toggle = expanded_source_panel_toggle_rect(area);
         assert_eq!(buf[(toggle.x, toggle.y)].symbol(), "»");
+    }
+
+    /// Build an app with a single git workspace in the given source-panel mode.
+    fn app_in_mode(mode: SourcePanelMode) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("my-project");
+        ws.set_source_panel_mode(mode);
+        app.workspaces = vec![ws];
+        app.selected = 0;
+        app.active = Some(0);
+        app
+    }
+
+    #[test]
+    fn mode_header_highlights_the_active_mode() {
+        // In Source mode the Source label carries the active highlight background
+        // and the Explorer label does not; switching modes moves the highlight.
+        let area = Rect::new(0, 0, 26, 20);
+        let tabs = compute_source_panel_mode_tab_areas(area);
+        let source_tab = tabs
+            .iter()
+            .find(|t| t.mode == SourcePanelMode::Source)
+            .unwrap()
+            .rect;
+        let explorer_tab = tabs
+            .iter()
+            .find(|t| t.mode == SourcePanelMode::Explorer)
+            .unwrap()
+            .rect;
+
+        let source_app = app_in_mode(SourcePanelMode::Source);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_source_panel(&source_app, frame, area))
+            .expect("source panel should render");
+        let buf = terminal.backend().buffer().clone();
+        let active_bg = source_app.palette.surface0;
+        assert_eq!(
+            buf[(source_tab.x, source_tab.y)].style().bg,
+            Some(active_bg)
+        );
+        assert_ne!(
+            buf[(explorer_tab.x, explorer_tab.y)].style().bg,
+            Some(active_bg)
+        );
+    }
+
+    #[test]
+    fn explorer_mode_shows_workspace_name_and_hides_source_sections() {
+        let area = Rect::new(0, 0, 26, 20);
+        let app = app_in_mode(SourcePanelMode::Explorer);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_source_panel(&app, frame, area))
+            .expect("source panel should render");
+
+        let buf = terminal.backend().buffer().clone();
+        let whole: String = (area.y..area.y + area.height)
+            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        // The workspace name / cwd basename anchors the Explorer header.
+        assert!(whole.contains("my-project"), "panel was {whole:?}");
+        // The Source mode's git sections are not rendered in Explorer mode.
+        assert!(!whole.contains("changes ("), "panel was {whole:?}");
+        assert!(!whole.contains("graph"), "panel was {whole:?}");
     }
 
     #[test]

@@ -458,6 +458,7 @@ impl App {
                 sidebar_rect: Rect::default(),
                 source_panel_rect: Rect::default(),
                 source_panel_toggle_rect: Rect::default(),
+                source_panel_mode_tab_areas: Vec::new(),
                 source_panel_section_divider_rect: Rect::default(),
                 source_panel_changes_card_areas: Vec::new(),
                 source_panel_changes_refresh_rect: Rect::default(),

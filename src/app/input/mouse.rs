@@ -421,7 +421,9 @@ impl AppState {
                 }
 
                 if in_source_panel {
-                    if self.on_source_panel_toggle(mouse.column, mouse.row) {
+                    if let Some(mode) = self.source_panel_mode_tab_at(mouse.column, mouse.row) {
+                        self.set_source_panel_mode(mode);
+                    } else if self.on_source_panel_toggle(mouse.column, mouse.row) {
                         self.source_panel_collapsed = !self.source_panel_collapsed;
                     } else if self.on_source_panel_changes_refresh(mouse.column, mouse.row)
                         || self.on_source_panel_log_refresh(mouse.column, mouse.row)

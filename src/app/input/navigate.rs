@@ -515,6 +515,7 @@ pub(crate) enum NavigateAction {
     EnterResizeMode,
     ToggleSidebar,
     ToggleSourcePanel,
+    ToggleSourcePanelMode,
     CyclePaneNext,
     CyclePanePrevious,
     LastPane,
@@ -623,6 +624,10 @@ fn action_for_key(
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
         (&kb.toggle_source_panel, NavigateAction::ToggleSourcePanel),
+        (
+            &kb.toggle_source_panel_mode,
+            NavigateAction::ToggleSourcePanelMode,
+        ),
         (&kb.reload_config, NavigateAction::ReloadConfig),
         (
             &kb.open_notification_target,
@@ -833,6 +838,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::ToggleSourcePanel => {
             state.source_panel_collapsed = !state.source_panel_collapsed;
+            leave_navigate_mode(state);
+        }
+        NavigateAction::ToggleSourcePanelMode => {
+            state.toggle_source_panel_mode();
             leave_navigate_mode(state);
         }
         NavigateAction::CyclePaneNext => {
@@ -1279,6 +1288,22 @@ mod tests {
         );
 
         assert!(state.source_panel_collapsed);
+        assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn toggle_source_panel_mode_action_flips_mode_and_exits_navigate() {
+        use crate::workspace::SourcePanelMode;
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.toggle_source_panel_mode = crate::config::ActionKeybinds::prefix("g");
+        assert_eq!(state.source_panel_mode(), SourcePanelMode::Source);
+
+        handle_navigate_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty()),
+        );
+
+        assert_eq!(state.source_panel_mode(), SourcePanelMode::Explorer);
         assert_eq!(state.mode, Mode::Terminal);
     }
 

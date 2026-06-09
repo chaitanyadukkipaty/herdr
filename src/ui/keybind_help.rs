@@ -141,6 +141,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             keybind_label(&kb.toggle_source_panel),
             "toggle source panel",
         ),
+        help_entry(
+            keybind_label(&kb.toggle_source_panel_mode),
+            "toggle source panel mode",
+        ),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
         help_entry(keybind_label(&kb.focus_pane_up), "focus pane up"),

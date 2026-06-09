@@ -393,6 +393,9 @@ pub struct KeysConfig {
     pub toggle_sidebar: BindingConfig,
     /// Toggle the source control panel. Default: "prefix+shift+s"
     pub toggle_source_panel: BindingConfig,
+    /// Toggle the source panel between Source and Explorer modes. Default:
+    /// "prefix+shift+e"
+    pub toggle_source_panel_mode: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -606,6 +609,7 @@ impl Default for KeysConfig {
             resize_mode: BindingConfig::one("prefix+r"),
             toggle_sidebar: BindingConfig::one("prefix+b"),
             toggle_source_panel: BindingConfig::one("prefix+shift+s"),
+            toggle_source_panel_mode: BindingConfig::one("prefix+shift+e"),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
         }
