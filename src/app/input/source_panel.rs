@@ -119,6 +119,10 @@ impl AppState {
     /// Route a scroll-wheel notch over the source panel to whichever section
     /// the cursor is over, scrolling only if that section actually overflows.
     pub(super) fn scroll_source_panel_section_at(&mut self, col: u16, row: u16, delta: i16) {
+        if self.source_panel_mode() == crate::workspace::SourcePanelMode::Explorer {
+            self.scroll_source_panel_explorer(delta);
+            return;
+        }
         let graph = self.source_panel_graph_rect();
         if rect_contains(graph, col, row) {
             if crate::ui::should_show_scrollbar(crate::ui::source_panel_log_scroll_metrics(
@@ -159,6 +163,69 @@ impl AppState {
             .iter()
             .find(|area| rect_contains(area.rect, col, row))
             .map(|area| area.change_idx)
+    }
+
+    /// The index (into `view.source_panel_explorer_node_areas`) of the Explorer
+    /// tree row under `(col, row)`, if any. Ignored while the panel is collapsed.
+    pub(super) fn explorer_node_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.source_panel_collapsed {
+            return None;
+        }
+        self.view
+            .source_panel_explorer_node_areas
+            .iter()
+            .position(|area| rect_contains(area.rect, col, row))
+    }
+
+    /// Handle a left-click on an Explorer tree row: select it (so the row
+    /// highlights), and — when it is a directory — toggle its expansion,
+    /// lazy-loading its children the first time. Files only select.
+    pub(super) fn click_explorer_node(&mut self, ws_idx: usize, node_idx: usize) {
+        let Some(area) = self.view.source_panel_explorer_node_areas.get(node_idx) else {
+            return;
+        };
+        let path = area.path.clone();
+        let expandable = area.expandable;
+        if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            ws.explorer_select(path.clone());
+            if expandable {
+                ws.explorer_toggle_expand(&path);
+            }
+        }
+    }
+
+    /// Scroll the Explorer tree by `delta` rows (negative scrolls up), clamped to
+    /// the tree's extent.
+    pub(super) fn scroll_source_panel_explorer(&mut self, delta: i16) {
+        let section = self.source_panel_explorer_tree_rect();
+        let max_scroll =
+            crate::ui::source_panel_explorer_scroll_metrics(self, section).max_offset_from_bottom;
+        let Some(ws_idx) = crate::ui::source_panel_workspace_idx(self) else {
+            return;
+        };
+        let Some(ws) = self.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        if delta.is_negative() {
+            ws.explorer_scroll = ws
+                .explorer_scroll
+                .saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            ws.explorer_scroll = ws
+                .explorer_scroll
+                .saturating_add(delta as usize)
+                .min(max_scroll);
+        }
+    }
+
+    /// The Explorer tree's scrollable body rect (below the mode header and the
+    /// workspace-name header), or default when collapsed/absent.
+    fn source_panel_explorer_tree_rect(&self) -> Rect {
+        let panel = self.view.source_panel_rect;
+        if self.source_panel_collapsed || panel.width <= 1 || panel.height == 0 {
+            return Rect::default();
+        }
+        crate::ui::source_panel_explorer_tree_rect(panel)
     }
 
     /// The `(log_idx, file_idx)` of the inline commit-file row under `(col, row)`.
@@ -728,7 +795,7 @@ mod tests {
         app.source_panel_log_scroll = 3;
         // Explorer mode's own scroll/selection (held per-workspace).
         app.workspaces[0].explorer_scroll = 9;
-        app.workspaces[0].explorer_selected = Some(2);
+        app.workspaces[0].explorer_selected = Some(std::path::PathBuf::from("/x/y.rs"));
 
         app.toggle_source_panel_mode(); // -> Explorer
         app.toggle_source_panel_mode(); // -> Source
@@ -738,7 +805,10 @@ mod tests {
         assert_eq!(app.source_panel_changes_scroll, 5);
         assert_eq!(app.source_panel_log_scroll, 3);
         assert_eq!(app.workspaces[0].explorer_scroll, 9);
-        assert_eq!(app.workspaces[0].explorer_selected, Some(2));
+        assert_eq!(
+            app.workspaces[0].explorer_selected,
+            Some(std::path::PathBuf::from("/x/y.rs"))
+        );
     }
 
     #[test]
@@ -953,6 +1023,136 @@ mod tests {
 
         app.source_panel_collapsed = true;
         assert!(!app.on_source_panel_resize_edge(70, 5)); // no resize when collapsed
+    }
+
+    #[test]
+    fn explorer_node_hit_test_resolves_node_index() {
+        use crate::app::state::SourcePanelExplorerNodeArea;
+        let mut app = AppState::test_new();
+        app.source_panel_collapsed = false;
+        app.view.source_panel_explorer_node_areas = vec![
+            SourcePanelExplorerNodeArea {
+                rect: Rect::new(71, 2, 24, 1),
+                path: std::path::PathBuf::from("/root/src"),
+                expandable: true,
+            },
+            SourcePanelExplorerNodeArea {
+                rect: Rect::new(71, 3, 24, 1),
+                path: std::path::PathBuf::from("/root/README.md"),
+                expandable: false,
+            },
+        ];
+
+        assert_eq!(app.explorer_node_at(75, 2), Some(0));
+        assert_eq!(app.explorer_node_at(75, 3), Some(1));
+        assert_eq!(app.explorer_node_at(75, 9), None); // below the rows
+        assert_eq!(app.explorer_node_at(120, 2), None); // outside the columns
+
+        app.source_panel_collapsed = true;
+        assert_eq!(app.explorer_node_at(75, 2), None); // ignored when collapsed
+    }
+
+    #[test]
+    fn clicking_a_folder_toggles_expansion_and_selects_it() {
+        use crate::app::state::SourcePanelExplorerNodeArea;
+        let mut app = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("ws");
+        // Root at a path so the folder/file paths are well-formed; no FS needed —
+        // expanding a missing path just caches an empty child list.
+        ws.explorer_set_root(std::path::PathBuf::from("/root"));
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        let folder = std::path::PathBuf::from("/root/src");
+        app.view.source_panel_explorer_node_areas = vec![SourcePanelExplorerNodeArea {
+            rect: Rect::new(71, 2, 24, 1),
+            path: folder.clone(),
+            expandable: true,
+        }];
+
+        // First click expands and selects the folder.
+        app.click_explorer_node(0, 0);
+        assert!(app.workspaces[0].explorer_expanded.contains(&folder));
+        assert_eq!(
+            app.workspaces[0].explorer_selected(),
+            Some(folder.as_path())
+        );
+
+        // A second click collapses it again (the expanded set is mutated back).
+        app.click_explorer_node(0, 0);
+        assert!(!app.workspaces[0].explorer_expanded.contains(&folder));
+    }
+
+    /// An app in Explorer mode whose current workspace holds an overflowing tree
+    /// (60 files) seeded directly into the cache, with a panel rect set so the
+    /// tree's scroll metrics resolve.
+    fn app_with_overflowing_explorer() -> AppState {
+        use crate::workspace::{FileEntryKind, FileTreeEntry, SourcePanelMode, Workspace};
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        let mut ws = Workspace::test_new("ws");
+        ws.set_source_panel_mode(SourcePanelMode::Explorer);
+        let root = std::path::PathBuf::from("/proj");
+        ws.explorer_root = Some(root.clone());
+        ws.explorer_cache.insert(
+            root.clone(),
+            (0..60)
+                .map(|i| FileTreeEntry {
+                    name: format!("file{i:02}.rs"),
+                    path: root.join(format!("file{i:02}.rs")),
+                    kind: FileEntryKind::File,
+                })
+                .collect(),
+        );
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        app.view.source_panel_rect = Rect::new(70, 0, 26, 20);
+        app
+    }
+
+    #[test]
+    fn wheel_scrolls_the_explorer_tree_then_clamps_to_top() {
+        let mut app = app_with_overflowing_explorer();
+
+        app.scroll_source_panel_explorer(3);
+        assert_eq!(app.workspaces[0].explorer_scroll, 3);
+
+        app.scroll_source_panel_explorer(-10);
+        assert_eq!(app.workspaces[0].explorer_scroll, 0);
+    }
+
+    #[test]
+    fn wheel_over_panel_routes_to_explorer_tree_in_explorer_mode() {
+        let mut app = app_with_overflowing_explorer();
+
+        // A scroll-wheel notch anywhere over the panel scrolls the tree, not the
+        // (hidden) Source-mode sections.
+        let panel = app.view.source_panel_rect;
+        app.scroll_source_panel_section_at(panel.x + 1, panel.y + 3, 2);
+
+        assert_eq!(app.workspaces[0].explorer_scroll, 2);
+        assert_eq!(app.source_panel_changes_scroll, 0);
+        assert_eq!(app.source_panel_log_scroll, 0);
+    }
+
+    #[test]
+    fn clicking_a_file_selects_without_expanding() {
+        use crate::app::state::SourcePanelExplorerNodeArea;
+        let mut app = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("ws");
+        ws.explorer_set_root(std::path::PathBuf::from("/root"));
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        let file = std::path::PathBuf::from("/root/README.md");
+        app.view.source_panel_explorer_node_areas = vec![SourcePanelExplorerNodeArea {
+            rect: Rect::new(71, 2, 24, 1),
+            path: file.clone(),
+            expandable: false,
+        }];
+
+        app.click_explorer_node(0, 0);
+
+        assert_eq!(app.workspaces[0].explorer_selected(), Some(file.as_path()));
+        assert!(app.workspaces[0].explorer_expanded.is_empty());
     }
 
     #[test]

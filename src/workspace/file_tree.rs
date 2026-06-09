@@ -1,0 +1,396 @@
+//! The Explorer mode's file-tree data layer: a directory-entry model plus pure
+//! listing, sorting, and flattening functions. Mirrors the source panel's git
+//! data layer (`source_panel.rs`) — the pure functions take their inputs as
+//! parameters (entries, a loaded-directory cache, an expanded set) rather than
+//! reading the filesystem internally, so they are unit-testable over in-memory
+//! fixtures with no real FS. The single FS adapter, [`read_dir_sorted`], is a
+//! thin wrapper over `std::fs::read_dir`.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+/// What kind of filesystem object a tree entry is. Symlinks are a distinct
+/// variant — they are shown in the tree but never followed, so a symlink to a
+/// directory is a non-expandable leaf and the tree never recurses into it
+/// (preventing cycles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileEntryKind {
+    Directory,
+    File,
+    Symlink,
+}
+
+/// One entry (child) of a directory in the Explorer tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTreeEntry {
+    /// The entry's basename, used for display and sorting.
+    pub name: String,
+    /// The entry's absolute path, used as the cache key when it is a directory
+    /// expanded to load its own children.
+    pub path: PathBuf,
+    pub kind: FileEntryKind,
+}
+
+impl FileTreeEntry {
+    /// Whether this entry is a real directory the tree may recurse into. A
+    /// symlink — even one pointing at a directory — is never expandable, so the
+    /// tree is never followed into it.
+    pub fn is_expandable_dir(&self) -> bool {
+        matches!(self.kind, FileEntryKind::Directory)
+    }
+}
+
+/// Sort a directory's entries for display: directories first, then files and
+/// symlinks, each group ordered case-insensitive alphabetical by name. Every
+/// entry passed in is preserved — dotfiles and git-ignored paths included —
+/// because the Explorer reflects the filesystem, not git tracking.
+pub fn sort_entries(mut entries: Vec<FileTreeEntry>) -> Vec<FileTreeEntry> {
+    entries.sort_by(|a, b| {
+        // Real directories sort ahead of everything else; symlinks sort with
+        // files since they are non-expandable leaves.
+        b.is_expandable_dir()
+            .cmp(&a.is_expandable_dir())
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries
+}
+
+/// List a directory's immediate children via `std::fs::read_dir`, classify each
+/// without following symlinks, and return them sorted for display. Every entry
+/// is included (dotfiles and git-ignored paths alike). A directory that fails to
+/// read (permissions, races, or not a directory) yields an empty list rather
+/// than an error — the caller caches that empty result so the failed read is
+/// never retried in a loop.
+pub fn read_dir_sorted(dir: &Path) -> Vec<FileTreeEntry> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        // `read_dir`'s `file_type` does not traverse symlinks, so a symlink is
+        // reported as a symlink (never as its target's kind) and the tree is
+        // never followed into it.
+        let kind = match entry.file_type() {
+            Ok(ft) if ft.is_symlink() => FileEntryKind::Symlink,
+            Ok(ft) if ft.is_dir() => FileEntryKind::Directory,
+            _ => FileEntryKind::File,
+        };
+        entries.push(FileTreeEntry { name, path, kind });
+    }
+    sort_entries(entries)
+}
+
+/// Truncate a display name to fit `max_width` columns, appending an ellipsis
+/// when it is clipped. Widths below 1 yield an empty string; a width of 1 with
+/// an over-long name yields just the ellipsis.
+pub fn truncate_with_ellipsis(name: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let count = name.chars().count();
+    if count <= max_width {
+        return name.to_string();
+    }
+    let keep = max_width.saturating_sub(1);
+    let mut out: String = name.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// One visible row of the flattened Explorer tree: either an entry node or a
+/// dim indicator beneath an expanded directory that has no children (genuinely
+/// empty, or unreadable).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileTreeRow {
+    Node(FileTreeNode),
+    /// Placeholder shown when an expanded directory loaded no entries. `depth`
+    /// is the indentation level of the (would-be) children.
+    Empty {
+        depth: usize,
+    },
+}
+
+/// An entry node positioned in the flattened tree, carrying its indentation
+/// `depth` and (for directories) whether it is currently expanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileTreeNode {
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: FileEntryKind,
+    pub depth: usize,
+    /// True when this is an expandable directory currently in the expanded set.
+    pub expanded: bool,
+}
+
+/// Flatten the lazily-loaded tree into the ordered rows the Explorer renders and
+/// scrolls over. Walks the `root` directory's cached children depth-first,
+/// descending into a directory only when it is in `expanded` (and so was loaded
+/// into `cache`). Symlinks are never expandable, so the walk never follows one —
+/// preventing cycles. An expanded directory whose cached child list is empty
+/// contributes a single [`FileTreeRow::Empty`] indicator rather than recursing.
+///
+/// Pure over its inputs: it reads only `cache` and `expanded`, never the
+/// filesystem, so it is unit-testable over in-memory fixtures.
+pub fn flatten_tree(
+    root: &Path,
+    cache: &HashMap<PathBuf, Vec<FileTreeEntry>>,
+    expanded: &HashSet<PathBuf>,
+) -> Vec<FileTreeRow> {
+    let mut rows = Vec::new();
+    flatten_into(root, 0, cache, expanded, &mut rows);
+    rows
+}
+
+fn flatten_into(
+    dir: &Path,
+    depth: usize,
+    cache: &HashMap<PathBuf, Vec<FileTreeEntry>>,
+    expanded: &HashSet<PathBuf>,
+    rows: &mut Vec<FileTreeRow>,
+) {
+    let children = cache.get(dir).map(Vec::as_slice).unwrap_or(&[]);
+    for entry in children {
+        let is_expanded = entry.is_expandable_dir() && expanded.contains(&entry.path);
+        rows.push(FileTreeRow::Node(FileTreeNode {
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+            kind: entry.kind,
+            depth,
+            expanded: is_expanded,
+        }));
+        if is_expanded {
+            let grandchildren = cache.get(&entry.path).map(Vec::as_slice).unwrap_or(&[]);
+            if grandchildren.is_empty() {
+                rows.push(FileTreeRow::Empty { depth: depth + 1 });
+            } else {
+                flatten_into(&entry.path, depth + 1, cache, expanded, rows);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, kind: FileEntryKind) -> FileTreeEntry {
+        FileTreeEntry {
+            name: name.to_string(),
+            path: PathBuf::from("/root").join(name),
+            kind,
+        }
+    }
+
+    fn dir(name: &str) -> FileTreeEntry {
+        entry(name, FileEntryKind::Directory)
+    }
+    fn file(name: &str) -> FileTreeEntry {
+        entry(name, FileEntryKind::File)
+    }
+
+    /// Build an entry whose path nests under `parent` rather than `/root`, so a
+    /// multi-level cache can be assembled.
+    fn child(parent: &Path, name: &str, kind: FileEntryKind) -> FileTreeEntry {
+        FileTreeEntry {
+            name: name.to_string(),
+            path: parent.join(name),
+            kind,
+        }
+    }
+
+    #[test]
+    fn flatten_descends_only_into_expanded_directories() {
+        let root = PathBuf::from("/root");
+        let src = root.join("src");
+        let mut cache = HashMap::new();
+        cache.insert(root.clone(), vec![dir("src"), file("README.md")]);
+        cache.insert(
+            src.clone(),
+            vec![child(&src, "main.rs", FileEntryKind::File)],
+        );
+
+        // Collapsed: only the root's immediate children show.
+        let collapsed = flatten_tree(&root, &cache, &HashSet::new());
+        let names: Vec<&str> = collapsed
+            .iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name.as_str()),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["src", "README.md"]);
+
+        // Expanding src reveals its child indented one level deeper.
+        let mut expanded = HashSet::new();
+        expanded.insert(src.clone());
+        let rows = flatten_tree(&root, &cache, &expanded);
+        let nodes: Vec<(&str, usize, bool)> = rows
+            .iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some((n.name.as_str(), n.depth, n.expanded)),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            nodes,
+            vec![
+                ("src", 0, true),
+                ("main.rs", 1, false),
+                ("README.md", 0, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_never_follows_a_symlink_even_when_expanded() {
+        let root = PathBuf::from("/root");
+        let link = root.join("link");
+        let mut cache = HashMap::new();
+        cache.insert(root.clone(), vec![entry("link", FileEntryKind::Symlink)]);
+        // Pretend the symlink target's children were somehow cached under its
+        // path, and the path is in the expanded set.
+        cache.insert(
+            link.clone(),
+            vec![child(&link, "secret.rs", FileEntryKind::File)],
+        );
+        let mut expanded = HashSet::new();
+        expanded.insert(link.clone());
+
+        let rows = flatten_tree(&root, &cache, &expanded);
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name.as_str()),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        // The symlink shows, but its target's children are never walked.
+        assert_eq!(names, vec!["link"]);
+        let link_node = match &rows[0] {
+            FileTreeRow::Node(n) => n,
+            FileTreeRow::Empty { .. } => panic!("expected a node row"),
+        };
+        assert!(!link_node.expanded, "a symlink is never marked expanded");
+    }
+
+    #[test]
+    fn expanded_empty_or_unreadable_directory_yields_an_indicator_row() {
+        let root = PathBuf::from("/root");
+        let empty = root.join("empty");
+        let mut cache = HashMap::new();
+        cache.insert(root.clone(), vec![dir("empty")]);
+        // An unreadable directory caches as an empty child list (read_dir failed)
+        // — indistinguishable from a genuinely empty directory, and crucially it
+        // is present in the cache so it is never re-read in a retry loop.
+        cache.insert(empty.clone(), Vec::new());
+        let mut expanded = HashSet::new();
+        expanded.insert(empty.clone());
+
+        let rows = flatten_tree(&root, &cache, &expanded);
+        assert_eq!(
+            rows,
+            vec![
+                FileTreeRow::Node(FileTreeNode {
+                    name: "empty".to_string(),
+                    path: empty,
+                    kind: FileEntryKind::Directory,
+                    depth: 0,
+                    expanded: true,
+                }),
+                FileTreeRow::Empty { depth: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn read_dir_sorted_is_empty_for_a_nonexistent_directory() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing = std::env::temp_dir().join(format!(
+            "herdr-file-tree-missing-{}-{}",
+            std::process::id(),
+            nanos,
+        ));
+        // The directory does not exist, so read_dir fails — but the call must
+        // degrade to an empty list rather than panic.
+        assert!(read_dir_sorted(&missing).is_empty());
+    }
+
+    #[test]
+    fn read_dir_sorted_lists_real_children_including_dotfiles_and_dirs_first() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "herdr-file-tree-read-{}-{}",
+            std::process::id(),
+            nanos,
+        ));
+        std::fs::create_dir_all(base.join("subdir")).unwrap();
+        std::fs::write(base.join("Zfile.txt"), b"x").unwrap();
+        std::fs::write(base.join(".dotfile"), b"x").unwrap();
+
+        let entries = read_dir_sorted(&base);
+        let _ = std::fs::remove_dir_all(&base);
+
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        // The directory sorts first; the dotfile is included and sorts with the
+        // files ahead of "Zfile.txt" (case-insensitive).
+        assert_eq!(names, vec!["subdir", ".dotfile", "Zfile.txt"]);
+        assert_eq!(entries[0].kind, FileEntryKind::Directory);
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_clips_long_names_and_keeps_short_ones() {
+        assert_eq!(truncate_with_ellipsis("main.rs", 20), "main.rs");
+        assert_eq!(
+            truncate_with_ellipsis("a_very_long_name.rs", 10),
+            "a_very_lo…"
+        );
+        assert_eq!(truncate_with_ellipsis("name", 0), "");
+        // Exactly the available width: no ellipsis.
+        assert_eq!(truncate_with_ellipsis("abcd", 4), "abcd");
+    }
+
+    #[test]
+    fn includes_dotfiles_and_treats_symlinks_as_non_followed_leaves() {
+        let sorted = sort_entries(vec![
+            entry(".gitignore", FileEntryKind::File),
+            entry(".config", FileEntryKind::Directory),
+            entry("link-to-dir", FileEntryKind::Symlink),
+            entry("zebra", FileEntryKind::Directory),
+        ]);
+
+        let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
+        // Dotfiles are not filtered out; a symlink (even pointing at a
+        // directory) sorts with the files because it is a non-followed leaf.
+        assert_eq!(names, vec![".config", "zebra", ".gitignore", "link-to-dir"]);
+
+        let symlink = sorted.iter().find(|e| e.name == "link-to-dir").unwrap();
+        assert_eq!(symlink.kind, FileEntryKind::Symlink);
+        assert!(
+            !symlink.is_expandable_dir(),
+            "a symlink must never be expandable, so the tree is never followed into it"
+        );
+    }
+
+    #[test]
+    fn sorts_directories_before_files_each_case_insensitive_alphabetical() {
+        let sorted = sort_entries(vec![
+            entry("README.md", FileEntryKind::File),
+            entry("src", FileEntryKind::Directory),
+            entry("Cargo.toml", FileEntryKind::File),
+            entry("docs", FileEntryKind::Directory),
+        ]);
+
+        let names: Vec<&str> = sorted.iter().map(|e| e.name.as_str()).collect();
+        // Directories first (docs, src — case-insensitive), then files
+        // (Cargo.toml, README.md — case-insensitive).
+        assert_eq!(names, vec!["docs", "src", "Cargo.toml", "README.md"]);
+    }
+}

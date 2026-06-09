@@ -345,6 +345,9 @@ fn restore_workspace(
             source_panel_mode: crate::workspace::SourcePanelMode::Source,
             explorer_scroll: 0,
             explorer_selected: None,
+            explorer_root: None,
+            explorer_cache: std::collections::HashMap::new(),
+            explorer_expanded: std::collections::HashSet::new(),
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })

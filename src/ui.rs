@@ -53,12 +53,13 @@ use self::settings::render_settings_overlay;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 pub(crate) use self::source_panel::{
     collapsed_source_panel_toggle_rect, compute_source_panel_changes_card_areas,
-    compute_source_panel_commit_file_card_areas, compute_source_panel_load_more_rect,
-    compute_source_panel_log_card_areas, compute_source_panel_mode_tab_areas,
-    expanded_source_panel_toggle_rect, source_panel_changes_rect,
-    source_panel_changes_refresh_rect, source_panel_changes_scroll_metrics,
-    source_panel_graph_rect, source_panel_log_refresh_rect, source_panel_log_scroll_metrics,
-    source_panel_section_divider_rect, source_panel_workspace_idx,
+    compute_source_panel_commit_file_card_areas, compute_source_panel_explorer_node_areas,
+    compute_source_panel_load_more_rect, compute_source_panel_log_card_areas,
+    compute_source_panel_mode_tab_areas, expanded_source_panel_toggle_rect,
+    source_panel_changes_rect, source_panel_changes_refresh_rect,
+    source_panel_changes_scroll_metrics, source_panel_explorer_scroll_metrics,
+    source_panel_explorer_tree_rect, source_panel_graph_rect, source_panel_log_refresh_rect,
+    source_panel_log_scroll_metrics, source_panel_section_divider_rect, source_panel_workspace_idx,
 };
 use self::source_panel::{
     render_source_panel, render_source_panel_collapsed, source_panel_has_git_workspace,
@@ -297,6 +298,33 @@ fn compute_view_internal(
         compute_source_panel_commit_file_card_areas(app, source_panel_area);
     let source_panel_load_more_rect = compute_source_panel_load_more_rect(app, source_panel_area);
 
+    // Explorer mode: root the tree at the workspace cwd (loading the root's
+    // children up front the first time), clamp its scroll, and lay out the
+    // clickable tree rows. Re-rooting only resets when the cwd actually changes.
+    if !source_panel_collapsed
+        && app.source_panel_mode() == crate::workspace::SourcePanelMode::Explorer
+    {
+        if let Some(ws_idx) = source_panel_workspace_idx(app) {
+            if let Some(root) = app
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.resolved_identity_cwd_from(&app.terminals, terminal_runtimes))
+            {
+                if let Some(ws) = app.workspaces.get_mut(ws_idx) {
+                    ws.explorer_set_root(root);
+                }
+            }
+            let tree_section = source_panel_explorer_tree_rect(source_panel_area);
+            let max_scroll =
+                source_panel_explorer_scroll_metrics(app, tree_section).max_offset_from_bottom;
+            if let Some(ws) = app.workspaces.get_mut(ws_idx) {
+                ws.explorer_scroll = ws.explorer_scroll.min(max_scroll);
+            }
+        }
+    }
+    let source_panel_explorer_node_areas =
+        compute_source_panel_explorer_node_areas(app, source_panel_area);
+
     let tab_bar_view = app
         .active
         .and_then(|i| app.workspaces.get(i))
@@ -360,6 +388,7 @@ fn compute_view_internal(
         source_panel_commit_file_card_areas,
         source_panel_log_refresh_rect,
         source_panel_load_more_rect,
+        source_panel_explorer_node_areas,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -439,6 +468,7 @@ fn compute_mobile_view(
         source_panel_commit_file_card_areas: Vec::new(),
         source_panel_log_refresh_rect: Rect::default(),
         source_panel_load_more_rect: Rect::default(),
+        source_panel_explorer_node_areas: Vec::new(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),

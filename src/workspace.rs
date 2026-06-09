@@ -16,6 +16,7 @@ use crate::pane::PaneState;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
+pub mod file_tree;
 mod git;
 mod tab;
 
@@ -23,6 +24,7 @@ mod tab;
 use self::git::git_ahead_behind;
 pub(crate) use self::git::{commit_files_for_cwd, DEFAULT_LOADED_COMMIT_COUNT};
 pub use self::{
+    file_tree::{FileEntryKind, FileTreeEntry, FileTreeRow},
     git::{
         changed_file_diff_argv, commit_file_diff_argv, commit_show_argv, derive_label_from_cwd,
         git_branch, git_space_metadata, git_status_cache_key, ChangeStatus, ChangedFile,
@@ -156,12 +158,20 @@ pub struct Workspace {
     pub(crate) source_panel_mode: SourcePanelMode,
     // Explorer mode's own scroll offset and selection, kept separate from the
     // Source mode scroll/selection so switching modes never disturbs the other's
-    // place. Populated and consumed by the Explorer tree slice; held here now so
-    // the two modes' view state is provably independent.
-    #[allow(dead_code)]
+    // place. Selection is the path of the last-clicked row, highlighted while it
+    // stays visible.
     pub(crate) explorer_scroll: usize,
-    #[allow(dead_code)]
-    pub(crate) explorer_selected: Option<usize>,
+    pub(crate) explorer_selected: Option<PathBuf>,
+    /// The directory the Explorer tree is rooted at — the workspace's resolved
+    /// working directory, set the first time the tree is built. Runtime-only.
+    pub(crate) explorer_root: Option<PathBuf>,
+    /// Lazily-loaded children per directory (absolute path → sorted entries).
+    /// The root's children load up front; a folder's children load the first
+    /// time it is expanded. An unreadable directory caches as an empty list so
+    /// its failed read is never retried. Runtime-only, per-workspace.
+    pub(crate) explorer_cache: HashMap<PathBuf, Vec<FileTreeEntry>>,
+    /// Folder paths the user has expanded. Runtime-only, per-workspace.
+    pub(crate) explorer_expanded: std::collections::HashSet<PathBuf>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -296,6 +306,9 @@ impl Workspace {
                 source_panel_mode: SourcePanelMode::Source,
                 explorer_scroll: 0,
                 explorer_selected: None,
+                explorer_root: None,
+                explorer_cache: HashMap::new(),
+                explorer_expanded: std::collections::HashSet::new(),
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -741,6 +754,61 @@ impl Workspace {
         self.source_panel_mode = self.source_panel_mode.toggled();
     }
 
+    /// Root the Explorer tree at `root` and load its immediate children up
+    /// front. Re-rooting (e.g. the workspace cwd changed) resets the cache,
+    /// expanded set, scroll, and selection so the tree reflects the new project.
+    pub fn explorer_set_root(&mut self, root: PathBuf) {
+        if self.explorer_root.as_deref() == Some(root.as_path()) {
+            return;
+        }
+        self.explorer_cache.clear();
+        self.explorer_expanded.clear();
+        self.explorer_scroll = 0;
+        self.explorer_selected = None;
+        self.explorer_ensure_loaded(&root);
+        self.explorer_root = Some(root);
+    }
+
+    /// Load a directory's children into the cache if they are not loaded yet. A
+    /// failed read is cached as an empty list, so it is read exactly once and
+    /// never retried in a loop.
+    fn explorer_ensure_loaded(&mut self, path: &std::path::Path) {
+        if !self.explorer_cache.contains_key(path) {
+            let entries = file_tree::read_dir_sorted(path);
+            self.explorer_cache.insert(path.to_path_buf(), entries);
+        }
+    }
+
+    /// Toggle a folder's expansion. Expanding loads its children the first time
+    /// (and only the first time); collapsing leaves the cache intact so
+    /// re-expanding is instant.
+    pub fn explorer_toggle_expand(&mut self, path: &std::path::Path) {
+        if self.explorer_expanded.remove(path) {
+            return;
+        }
+        self.explorer_ensure_loaded(path);
+        self.explorer_expanded.insert(path.to_path_buf());
+    }
+
+    /// Set the highlighted selection to `path` (the last-clicked row).
+    pub fn explorer_select(&mut self, path: PathBuf) {
+        self.explorer_selected = Some(path);
+    }
+
+    /// The currently selected (highlighted) row path, if any.
+    pub fn explorer_selected(&self) -> Option<&std::path::Path> {
+        self.explorer_selected.as_deref()
+    }
+
+    /// The flattened, ordered rows of the Explorer tree for the current cache and
+    /// expanded set. Empty until the tree has been rooted.
+    pub fn explorer_rows(&self) -> Vec<FileTreeRow> {
+        let Some(root) = self.explorer_root.as_deref() else {
+            return Vec::new();
+        };
+        file_tree::flatten_tree(root, &self.explorer_cache, &self.explorer_expanded)
+    }
+
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
     }
@@ -921,6 +989,9 @@ impl Workspace {
             source_panel_mode: SourcePanelMode::Source,
             explorer_scroll: 0,
             explorer_selected: None,
+            explorer_root: None,
+            explorer_cache: HashMap::new(),
+            explorer_expanded: std::collections::HashSet::new(),
             test_runtimes: HashMap::new(),
         }
     }
@@ -980,6 +1051,105 @@ mod tests {
         assert_eq!(ws.source_panel_mode(), SourcePanelMode::Explorer);
         ws.toggle_source_panel_mode();
         assert_eq!(ws.source_panel_mode(), SourcePanelMode::Source);
+    }
+
+    /// Create a unique temp directory tree for Explorer state tests.
+    fn temp_tree(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "herdr-ws-explorer-{tag}-{}-{}",
+            std::process::id(),
+            nanos,
+        ));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("src").join("main.rs"), b"x").unwrap();
+        std::fs::write(base.join("README.md"), b"x").unwrap();
+        base
+    }
+
+    #[test]
+    fn rooting_the_explorer_loads_the_roots_children_up_front() {
+        let base = temp_tree("root");
+        let mut ws = Workspace::test_new("ws");
+
+        ws.explorer_set_root(base.clone());
+
+        // The root's immediate children are listed without expanding anything.
+        let names: Vec<String> = ws
+            .explorer_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(names, vec!["src".to_string(), "README.md".to_string()]);
+    }
+
+    #[test]
+    fn expanding_a_folder_loads_its_children_only_on_first_expand() {
+        let base = temp_tree("expand");
+        let mut ws = Workspace::test_new("ws");
+        ws.explorer_set_root(base.clone());
+        let src = base.join("src");
+
+        // Before expanding, src's children are not in the cache.
+        assert!(!ws.explorer_cache.contains_key(&src));
+
+        ws.explorer_toggle_expand(&src);
+        assert!(ws.explorer_expanded.contains(&src));
+        assert!(ws.explorer_cache.contains_key(&src));
+        let expanded_names: Vec<String> = ws
+            .explorer_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            expanded_names,
+            vec![
+                "src".to_string(),
+                "main.rs".to_string(),
+                "README.md".to_string()
+            ]
+        );
+
+        // Collapsing keeps the cached children so re-expanding does not re-read.
+        ws.explorer_toggle_expand(&src);
+        assert!(!ws.explorer_expanded.contains(&src));
+        assert!(ws.explorer_cache.contains_key(&src));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn each_workspace_has_independent_explorer_tree_state() {
+        let base = temp_tree("indep");
+        let mut a = Workspace::test_new("a");
+        let mut b = Workspace::test_new("b");
+        a.explorer_set_root(base.clone());
+        b.explorer_set_root(base.clone());
+        let src = base.join("src");
+
+        a.explorer_toggle_expand(&src);
+        a.explorer_select(base.join("README.md"));
+
+        // Workspace b's tree state is untouched by interactions with a.
+        assert!(a.explorer_expanded.contains(&src));
+        assert!(!b.explorer_expanded.contains(&src));
+        assert_eq!(
+            a.explorer_selected(),
+            Some(base.join("README.md").as_path())
+        );
+        assert_eq!(b.explorer_selected(), None);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

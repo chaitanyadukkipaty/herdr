@@ -9,11 +9,12 @@ use ratatui::{
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use crate::app::state::{
     Palette, SourcePanelActiveItem, SourcePanelCommitArea, SourcePanelCommitFileArea,
-    SourcePanelFileArea, SourcePanelModeTabArea,
+    SourcePanelExplorerNodeArea, SourcePanelFileArea, SourcePanelModeTabArea,
 };
 use crate::app::{AppState, Mode};
 use crate::pane::ScrollMetrics;
-use crate::workspace::{ChangeStatus, ChangedFile, CommitInfo, SourcePanelMode};
+use crate::workspace::file_tree::{truncate_with_ellipsis, FileTreeNode, FileTreeRow};
+use crate::workspace::{ChangeStatus, ChangedFile, CommitInfo, FileEntryKind, SourcePanelMode};
 
 /// The mode-label texts of the header segmented control, in display order.
 const SOURCE_PANEL_MODE_TABS: [(SourcePanelMode, &str); 2] = [
@@ -273,7 +274,7 @@ fn source_panel_log_row_count(app: &AppState) -> usize {
 /// occupies, honoring the current scroll offset. Shared by the card-area and
 /// load-more computations and used implicitly when rendering.
 fn source_panel_graph_visible_rows(app: &AppState, panel_area: Rect) -> Vec<(GraphRow, Rect)> {
-    if app.source_panel_collapsed {
+    if app.source_panel_collapsed || app.source_panel_mode() != SourcePanelMode::Source {
         return Vec::new();
     }
     let section = source_panel_graph_rect(panel_area, app.source_panel_section_split);
@@ -415,7 +416,7 @@ pub(crate) fn compute_source_panel_changes_card_areas(
     app: &AppState,
     panel_area: Rect,
 ) -> Vec<SourcePanelFileArea> {
-    if app.source_panel_collapsed {
+    if app.source_panel_collapsed || app.source_panel_mode() != SourcePanelMode::Source {
         return Vec::new();
     }
     let section = source_panel_changes_rect(panel_area, app.source_panel_section_split);
@@ -592,13 +593,139 @@ fn render_source_panel_mode_header(app: &AppState, frame: &mut Frame, area: Rect
     }
 }
 
-/// Explorer mode body: a header line showing the workspace name / cwd basename
-/// so the user knows which project's tree they are looking at, above an
-/// (empty) Explorer area. The tree itself lands in a later slice.
-fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
-    let p = &app.palette;
+/// The Explorer's 1-row header (the workspace name / cwd basename), at the top
+/// of the panel body.
+fn source_panel_explorer_header_rect(area: Rect) -> Rect {
     let body = source_panel_body_rect(area);
     if body.width == 0 || body.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(body.x, body.y, body.width, 1)
+}
+
+/// The scrollable tree area of Explorer mode, below the workspace-name header.
+pub(crate) fn source_panel_explorer_tree_rect(area: Rect) -> Rect {
+    let body = source_panel_body_rect(area);
+    if body.width == 0 || body.height <= 1 {
+        return Rect::default();
+    }
+    Rect::new(body.x, body.y + 1, body.width, body.height - 1)
+}
+
+/// The flattened Explorer rows of the panel's current workspace.
+fn source_panel_explorer_rows(app: &AppState) -> Vec<FileTreeRow> {
+    source_panel_workspace_idx(app)
+        .and_then(|idx| app.workspaces.get(idx))
+        .map(|ws| ws.explorer_rows())
+        .unwrap_or_default()
+}
+
+/// The current workspace's Explorer scroll offset (rows scrolled past the top).
+fn source_panel_explorer_scroll(app: &AppState) -> usize {
+    source_panel_workspace_idx(app)
+        .and_then(|idx| app.workspaces.get(idx))
+        .map(|ws| ws.explorer_scroll)
+        .unwrap_or(0)
+}
+
+pub(crate) fn source_panel_explorer_scroll_metrics(app: &AppState, section: Rect) -> ScrollMetrics {
+    let viewport_rows = section.height as usize;
+    let total_rows = source_panel_explorer_rows(app).len();
+    let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
+    let offset_from_bottom = total_rows
+        .saturating_sub(source_panel_explorer_scroll(app))
+        .saturating_sub(viewport_rows);
+    ScrollMetrics {
+        offset_from_bottom,
+        max_offset_from_bottom,
+        viewport_rows,
+    }
+}
+
+/// The body width of the tree, reserving the rightmost column for a scrollbar
+/// when the tree overflows its viewport.
+fn source_panel_explorer_body_rect(section: Rect, has_scrollbar: bool) -> Rect {
+    if section.width == 0 || section.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        section.x,
+        section.y,
+        section.width.saturating_sub(u16::from(has_scrollbar)),
+        section.height,
+    )
+}
+
+/// The visible (scrolled) Explorer rows paired with the 1-row rect each occupies.
+/// Shared by the clickable-node computation and rendering.
+fn source_panel_explorer_visible_rows(
+    app: &AppState,
+    panel_area: Rect,
+) -> Vec<(FileTreeRow, Rect)> {
+    if app.source_panel_collapsed || app.source_panel_mode() != SourcePanelMode::Explorer {
+        return Vec::new();
+    }
+    let section = source_panel_explorer_tree_rect(panel_area);
+    if section == Rect::default() {
+        return Vec::new();
+    }
+    let rows = source_panel_explorer_rows(app);
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let metrics = source_panel_explorer_scroll_metrics(app, section);
+    let body = source_panel_explorer_body_rect(section, should_show_scrollbar(metrics));
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+    let body_bottom = body.y + body.height;
+    rows.into_iter()
+        .skip(source_panel_explorer_scroll(app))
+        .zip(body.y..body_bottom)
+        .map(|(row, y)| (row, Rect::new(body.x, y, body.width, 1)))
+        .collect()
+}
+
+/// Clickable row rects for the visible Explorer-tree entry nodes. Indicator
+/// (empty-directory) rows occupy space but are not clickable, so they are
+/// omitted here.
+pub(crate) fn compute_source_panel_explorer_node_areas(
+    app: &AppState,
+    panel_area: Rect,
+) -> Vec<SourcePanelExplorerNodeArea> {
+    source_panel_explorer_visible_rows(app, panel_area)
+        .into_iter()
+        .filter_map(|(row, rect)| match row {
+            FileTreeRow::Node(node) => Some(SourcePanelExplorerNodeArea {
+                rect,
+                expandable: matches!(node.kind, FileEntryKind::Directory),
+                path: node.path,
+            }),
+            FileTreeRow::Empty { .. } => None,
+        })
+        .collect()
+}
+
+fn source_panel_explorer_scrollbar_rect(app: &AppState, section: Rect) -> Option<Rect> {
+    let metrics = source_panel_explorer_scroll_metrics(app, section);
+    (should_show_scrollbar(metrics) && section.width > 0 && section.height > 0).then_some(
+        Rect::new(
+            section.x + section.width.saturating_sub(1),
+            section.y,
+            1,
+            section.height,
+        ),
+    )
+}
+
+/// Explorer mode body: a header line showing the workspace name / cwd basename,
+/// then the lazily-loaded directory tree — folders carry an expand/collapse
+/// chevron, files a neutral marker, the selected row is highlighted, long names
+/// truncate with an ellipsis, and the tree shows a scrollbar when it overflows.
+fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
+    let p = &app.palette;
+    let header = source_panel_explorer_header_rect(area);
+    if header == Rect::default() {
         return;
     }
     let name = source_panel_workspace_idx(app)
@@ -610,7 +737,95 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
             format!(" {name}"),
             Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
         )),
-        Rect::new(body.x, body.y, body.width, 1),
+        header,
+    );
+
+    let selected = source_panel_workspace_idx(app)
+        .and_then(|idx| app.workspaces.get(idx))
+        .and_then(|ws| ws.explorer_selected())
+        .map(|path| path.to_path_buf());
+
+    for (row, rect) in source_panel_explorer_visible_rows(app, area) {
+        match row {
+            FileTreeRow::Node(node) => {
+                let highlighted = selected.as_deref() == Some(node.path.as_path());
+                if highlighted {
+                    highlight_row(frame, rect, p.surface0);
+                }
+                render_explorer_node_row(frame, rect, &node, p);
+            }
+            FileTreeRow::Empty { depth } => render_explorer_empty_row(frame, rect, depth, p),
+        }
+    }
+
+    let section = source_panel_explorer_tree_rect(area);
+    if let Some(track) = source_panel_explorer_scrollbar_rect(app, section) {
+        let metrics = source_panel_explorer_scroll_metrics(app, section);
+        render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
+    }
+}
+
+/// Render one tree row: `<indent><chevron|marker> <name>`, with the name
+/// truncated to fit. Directories show ▸/▾; files and symlinks show a neutral
+/// marker.
+fn render_explorer_node_row(frame: &mut Frame, row: Rect, node: &FileTreeNode, p: &Palette) {
+    if row.width == 0 {
+        return;
+    }
+    // Two columns per depth level of indentation, then a 1-column marker and a
+    // separating space before the name.
+    let indent = node.depth * 2;
+    let marker = match node.kind {
+        FileEntryKind::Directory => {
+            if node.expanded {
+                "▾"
+            } else {
+                "▸"
+            }
+        }
+        FileEntryKind::Symlink => "↩",
+        FileEntryKind::File => "·",
+    };
+    let marker_color = match node.kind {
+        FileEntryKind::Directory => p.overlay0,
+        _ => p.overlay1,
+    };
+    let name_color = match node.kind {
+        FileEntryKind::Directory => p.text,
+        _ => p.subtext0,
+    };
+    let prefix_cols = indent + 2; // indent + marker + space
+    let name_width = (row.width as usize).saturating_sub(prefix_cols);
+    let name = truncate_with_ellipsis(&node.name, name_width);
+    let spans = vec![
+        Span::styled(" ".repeat(indent), Style::default()),
+        Span::styled(marker, Style::default().fg(marker_color)),
+        Span::styled(" ", Style::default()),
+        Span::styled(name, Style::default().fg(name_color)),
+    ];
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(row.x, row.y, row.width, 1),
+    );
+}
+
+/// Render the dim indicator beneath an expanded directory with no children
+/// (genuinely empty, or unreadable).
+fn render_explorer_empty_row(frame: &mut Frame, row: Rect, depth: usize, p: &Palette) {
+    if row.width == 0 {
+        return;
+    }
+    let indent = depth * 2;
+    let spans = vec![
+        Span::styled(" ".repeat(indent), Style::default()),
+        Span::styled(
+            "(empty)",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(row.x, row.y, row.width, 1),
     );
 }
 
@@ -1162,6 +1377,173 @@ mod tests {
         // The Source mode's git sections are not rendered in Explorer mode.
         assert!(!whole.contains("changes ("), "panel was {whole:?}");
         assert!(!whole.contains("graph"), "panel was {whole:?}");
+    }
+
+    /// An app in Explorer mode with a directory tree seeded directly into the
+    /// cache (no real filesystem), rooted at `/proj`.
+    fn app_with_explorer_tree() -> crate::app::state::AppState {
+        use crate::workspace::{FileEntryKind, FileTreeEntry, Workspace};
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("proj");
+        ws.set_source_panel_mode(SourcePanelMode::Explorer);
+        let root = std::path::PathBuf::from("/proj");
+        ws.explorer_root = Some(root.clone());
+        ws.explorer_cache.insert(
+            root.clone(),
+            vec![
+                FileTreeEntry {
+                    name: "src".into(),
+                    path: root.join("src"),
+                    kind: FileEntryKind::Directory,
+                },
+                FileTreeEntry {
+                    name: "README.md".into(),
+                    path: root.join("README.md"),
+                    kind: FileEntryKind::File,
+                },
+            ],
+        );
+        app.workspaces = vec![ws];
+        app.selected = 0;
+        app.active = Some(0);
+        app
+    }
+
+    #[test]
+    fn explorer_node_areas_map_visible_rows_to_paths_and_expandability() {
+        let app = app_with_explorer_tree();
+        let area = Rect::new(0, 0, 26, 20);
+
+        let nodes = compute_source_panel_explorer_node_areas(&app, area);
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].path, std::path::PathBuf::from("/proj/src"));
+        assert!(nodes[0].expandable, "a directory is expandable");
+        assert_eq!(nodes[1].path, std::path::PathBuf::from("/proj/README.md"));
+        assert!(!nodes[1].expandable, "a file is not expandable");
+        // Rows stack one below the next, beneath the workspace-name header.
+        assert_eq!(nodes[1].rect.y, nodes[0].rect.y + 1);
+    }
+
+    #[test]
+    fn explorer_renders_folder_chevron_and_file_marker_with_names() {
+        let app = app_with_explorer_tree();
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_source_panel(&app, frame, area))
+            .expect("source panel should render");
+
+        let buf = terminal.backend().buffer().clone();
+        let tree = source_panel_explorer_tree_rect(area);
+        let first: String = (tree.x..tree.x + tree.width)
+            .map(|x| buf[(x, tree.y)].symbol())
+            .collect();
+        assert!(first.contains('▸'), "folder row was {first:?}");
+        assert!(first.contains("src"), "folder row was {first:?}");
+        let second: String = (tree.x..tree.x + tree.width)
+            .map(|x| buf[(x, tree.y + 1)].symbol())
+            .collect();
+        assert!(second.contains("README.md"), "file row was {second:?}");
+    }
+
+    #[test]
+    fn explorer_highlights_the_selected_row() {
+        let mut app = app_with_explorer_tree();
+        app.workspaces[0].explorer_select(std::path::PathBuf::from("/proj/src"));
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_source_panel(&app, frame, area))
+            .expect("source panel should render");
+
+        let buf = terminal.backend().buffer().clone();
+        let tree = source_panel_explorer_tree_rect(area);
+        // The selected "src" row carries the highlight background; the unselected
+        // "README.md" row below it does not.
+        assert_eq!(buf[(tree.x, tree.y)].style().bg, Some(app.palette.surface0));
+        assert_ne!(
+            buf[(tree.x, tree.y + 1)].style().bg,
+            Some(app.palette.surface0)
+        );
+    }
+
+    #[test]
+    fn explorer_truncates_long_names_with_an_ellipsis() {
+        use crate::workspace::{FileEntryKind, FileTreeEntry};
+        let mut app = app_with_explorer_tree();
+        let root = std::path::PathBuf::from("/proj");
+        app.workspaces[0].explorer_cache.insert(
+            root.clone(),
+            vec![FileTreeEntry {
+                name: "a_really_really_long_file_name_that_overflows.rs".into(),
+                path: root.join("a_really_really_long_file_name_that_overflows.rs"),
+                kind: FileEntryKind::File,
+            }],
+        );
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_source_panel(&app, frame, area))
+            .expect("source panel should render");
+
+        let buf = terminal.backend().buffer().clone();
+        let tree = source_panel_explorer_tree_rect(area);
+        let row: String = (tree.x..tree.x + tree.width)
+            .map(|x| buf[(x, tree.y)].symbol())
+            .collect();
+        assert!(row.contains('…'), "row should be truncated, was {row:?}");
+    }
+
+    #[test]
+    fn explorer_shows_empty_indicator_under_an_expanded_empty_directory() {
+        let mut app = app_with_explorer_tree();
+        let src = std::path::PathBuf::from("/proj/src");
+        // src is expanded but its cached child list is empty (empty/unreadable).
+        app.workspaces[0]
+            .explorer_cache
+            .insert(src.clone(), Vec::new());
+        app.workspaces[0].explorer_expanded.insert(src);
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal =
+            Terminal::new(TestBackend::new(26, 20)).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| render_source_panel(&app, frame, area))
+            .expect("source panel should render");
+
+        let buf = terminal.backend().buffer().clone();
+        let whole: String = (area.y..area.y + area.height)
+            .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf[(x, y)].symbol().to_string())
+            .collect();
+        assert!(whole.contains("(empty)"), "panel was {whole:?}");
+    }
+
+    #[test]
+    fn explorer_shows_a_scrollbar_when_the_tree_overflows() {
+        use crate::workspace::{FileEntryKind, FileTreeEntry};
+        let mut app = app_with_explorer_tree();
+        let root = std::path::PathBuf::from("/proj");
+        let many: Vec<FileTreeEntry> = (0..60)
+            .map(|i| FileTreeEntry {
+                name: format!("file{i:02}.rs"),
+                path: root.join(format!("file{i:02}.rs")),
+                kind: FileEntryKind::File,
+            })
+            .collect();
+        app.workspaces[0].explorer_cache.insert(root, many);
+        let area = Rect::new(0, 0, 26, 20);
+        let section = source_panel_explorer_tree_rect(area);
+
+        let metrics = source_panel_explorer_scroll_metrics(&app, section);
+        assert!(
+            should_show_scrollbar(metrics),
+            "a 60-row tree in a ~18-row viewport overflows"
+        );
+        assert!(source_panel_explorer_scrollbar_rect(&app, section).is_some());
     }
 
     #[test]

@@ -461,6 +461,10 @@ impl AppState {
                                 mouse.column,
                             );
                         }
+                    } else if let Some(node_idx) = self.explorer_node_at(mouse.column, mouse.row) {
+                        if let Some(ws_idx) = crate::ui::source_panel_workspace_idx(self) {
+                            self.click_explorer_node(ws_idx, node_idx);
+                        }
                     }
                     return None;
                 }

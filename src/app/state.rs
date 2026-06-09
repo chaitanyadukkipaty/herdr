@@ -574,6 +574,16 @@ pub struct SourcePanelFileArea {
     pub change_idx: usize,
 }
 
+/// A clickable Explorer-tree row in the source panel. `path` is the node's
+/// absolute path; `expandable` is true for a real directory (a single click
+/// toggles its expansion), false for a file or symlink (a click only selects).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePanelExplorerNodeArea {
+    pub rect: Rect,
+    pub path: std::path::PathBuf,
+    pub expandable: bool,
+}
+
 /// A clickable label of the source-panel header's mode segmented control. Each
 /// label maps its rect to the [`SourcePanelMode`] it activates when clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -784,6 +794,9 @@ pub struct ViewState {
     pub source_panel_log_refresh_rect: Rect,
     /// The clickable " load more" row, present when more history is available.
     pub source_panel_load_more_rect: Rect,
+    /// Clickable Explorer-tree rows, in top-to-bottom display order, for the
+    /// currently visible (scrolled) window of the tree.
+    pub source_panel_explorer_node_areas: Vec<SourcePanelExplorerNodeArea>,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1751,6 +1764,7 @@ impl AppState {
                 source_panel_commit_file_card_areas: Vec::new(),
                 source_panel_log_refresh_rect: Rect::default(),
                 source_panel_load_more_rect: Rect::default(),
+                source_panel_explorer_node_areas: Vec::new(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
