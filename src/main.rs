@@ -2,9 +2,10 @@ use std::io;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    EnableFocusChange, EnableMouseCapture,
 };
+#[cfg(not(windows))]
+use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
@@ -18,10 +19,34 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+#[cfg(not(windows))]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
+    )
+}
+
+#[cfg(windows)]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    execute!(io::stdout(), PopKeyboardEnhancementFlags)
+}
+
+#[cfg(windows)]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
+}
+
 mod agent_resume;
 mod api;
 mod app;
 mod build_info;
+#[cfg(not(windows))]
 mod checksum;
 mod cli;
 mod client;
@@ -632,11 +657,11 @@ fn main() -> io::Result<()> {
         }
         let _ = execute!(
             io::stdout(),
-            PopKeyboardEnhancementFlags,
             DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture
         );
+        let _ = pop_keyboard_enhancement_flags();
         ratatui::restore();
         original_hook(info);
     }));
@@ -661,12 +686,8 @@ fn main() -> io::Result<()> {
         } else {
             execute!(io::stdout(), DisableMouseCapture)?;
         }
-        execute!(
-            io::stdout(),
-            EnableBracketedPaste,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
-        )?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        push_keyboard_enhancement_flags()?;
 
         // Some hosts do not honor Kitty keyboard enhancement pushes for
         // Shift+Enter. Enable xterm modifyOtherKeys only on hosts where we
@@ -696,9 +717,9 @@ fn main() -> io::Result<()> {
         if crate::kitty_graphics::is_enabled() {
             crate::kitty_graphics::clear_all_host_graphics()?;
         }
+        pop_keyboard_enhancement_flags()?;
         execute!(
             io::stdout(),
-            PopKeyboardEnhancementFlags,
             DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture

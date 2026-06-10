@@ -1484,6 +1484,10 @@ pub struct AppState {
     pub settings: SettingsState,
     /// Cached integration recommendations for onboarding/settings UI.
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
+    /// Cached detection manifest source/version summaries for runtime/API status.
+    pub agent_manifest_summaries: Vec<crate::detect::manifest::AgentManifestSummary>,
+    /// Cached remote detection manifest update diagnostics for runtime/API status.
+    pub agent_manifest_update_status: crate::detect::manifest_update::ManifestUpdateStatus,
     /// Result messages from the latest integration install action.
     pub integration_install_messages: Vec<String>,
     /// Highlight state for the bottom-right global launcher menu.
@@ -1526,10 +1530,22 @@ impl AppState {
         self.switch_ascii_input_source_in_prefix
     }
 
+    pub(crate) fn pane_exposes_host_cursor(
+        &self,
+        _ws_idx: usize,
+        _pane_id: crate::layout::PaneId,
+    ) -> bool {
+        true
+    }
+
     pub(crate) fn integration_updates_available(&self) -> bool {
         self.integration_recommendations
             .iter()
             .any(|item| item.state == crate::integration::IntegrationStatusKind::Outdated)
+    }
+
+    pub(crate) fn refresh_agent_manifest_summaries(&mut self) {
+        self.agent_manifest_summaries = crate::detect::manifest::manifest_summaries();
     }
 
     pub(crate) fn global_menu_attention_badge_visible(&self) -> bool {
@@ -1823,6 +1839,9 @@ impl AppState {
                 original_theme: None,
             },
             integration_recommendations: Vec::new(),
+            agent_manifest_summaries: Vec::new(),
+            agent_manifest_update_status:
+                crate::detect::manifest_update::ManifestUpdateStatus::default(),
             integration_install_messages: Vec::new(),
             global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
@@ -1869,6 +1888,28 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn agent_terminal_keeps_final_child_cursor_exposed() {
+        let mut state = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        state.terminals.insert(
+            ws.tabs[0].panes[&pane_id].attached_terminal_id.clone(),
+            crate::terminal::TerminalState::new(
+                ws.tabs[0].panes[&pane_id].attached_terminal_id.clone(),
+                std::path::PathBuf::from("/tmp"),
+            ),
+        );
+        state
+            .terminals
+            .get_mut(&ws.tabs[0].panes[&pane_id].attached_terminal_id)
+            .expect("terminal state")
+            .launch_argv = Some(vec!["codex".to_string()]);
+        state.workspaces = vec![ws];
+
+        assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
 
     #[test]
     fn built_in_theme_names_resolve() {
