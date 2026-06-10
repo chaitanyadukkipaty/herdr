@@ -792,6 +792,28 @@ impl Workspace {
         self.explorer_expanded.insert(path.to_path_buf());
     }
 
+    /// Force an immediate re-read of the loaded tree: re-stat the root and every
+    /// currently-expanded directory so on-disk changes (entries added, removed,
+    /// or renamed while the folder was open) are picked up on demand. Collapsed
+    /// folders are intentionally left stale — they are re-read when next
+    /// expanded. A pure view operation: it reads the filesystem but mutates
+    /// nothing on disk, and leaves the `expanded` set untouched.
+    pub fn explorer_refresh(&mut self) {
+        let mut dirs: Vec<PathBuf> = self.explorer_root.iter().cloned().collect();
+        dirs.extend(self.explorer_expanded.iter().cloned());
+        for dir in dirs {
+            let entries = file_tree::read_dir_sorted(&dir);
+            self.explorer_cache.insert(dir, entries);
+        }
+    }
+
+    /// Collapse every expanded folder, returning the tree to just its roots.
+    /// The directory cache is left intact so re-expanding is instant; only the
+    /// `expanded` set is cleared. A pure view operation — touches no filesystem.
+    pub fn explorer_collapse_all(&mut self) {
+        self.explorer_expanded.clear();
+    }
+
     /// Set the highlighted selection to `path` (the last-clicked row).
     pub fn explorer_select(&mut self, path: PathBuf) {
         self.explorer_selected = Some(path);
@@ -1127,6 +1149,45 @@ mod tests {
             decorations.get(&base.join("src")),
             Some(&crate::workspace::file_tree::FileTreeDecoration::ContainsChanges),
         );
+    }
+
+    #[test]
+    fn refresh_restats_expanded_directories_and_updates_the_tree() {
+        let base = temp_tree("refresh");
+        let mut ws = Workspace::test_new("ws");
+        ws.explorer_set_root(base.clone());
+        let src = base.join("src");
+        ws.explorer_toggle_expand(&src);
+
+        // A file appears on disk inside the expanded folder after it was loaded.
+        std::fs::write(src.join("added.rs"), b"x").unwrap();
+
+        // Before a refresh the cached tree is stale: the new file is absent.
+        let before: Vec<String> = ws
+            .explorer_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        assert!(!before.contains(&"added.rs".to_string()));
+
+        // Refreshing re-stats the currently-expanded directories, so the new file
+        // shows up while the folder stays expanded.
+        ws.explorer_refresh();
+        let after: Vec<String> = ws
+            .explorer_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(after.contains(&"added.rs".to_string()));
+        assert!(ws.explorer_expanded.contains(&src));
     }
 
     #[test]

@@ -797,6 +797,12 @@ pub struct ViewState {
     /// Clickable Explorer-tree rows, in top-to-bottom display order, for the
     /// currently visible (scrolled) window of the tree.
     pub source_panel_explorer_node_areas: Vec<SourcePanelExplorerNodeArea>,
+    /// The clickable ↻ refresh glyph in the Explorer header (re-stats the
+    /// currently-expanded directories). Present only in Explorer mode.
+    pub source_panel_explorer_refresh_rect: Rect,
+    /// The clickable collapse-all glyph in the Explorer header (clears the
+    /// `expanded` set). Present only in Explorer mode.
+    pub source_panel_explorer_collapse_all_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1773,6 +1779,8 @@ impl AppState {
                 source_panel_log_refresh_rect: Rect::default(),
                 source_panel_load_more_rect: Rect::default(),
                 source_panel_explorer_node_areas: Vec::new(),
+                source_panel_explorer_refresh_rect: Rect::default(),
+                source_panel_explorer_collapse_all_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),

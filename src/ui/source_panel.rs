@@ -605,6 +605,25 @@ fn source_panel_explorer_header_rect(area: Rect) -> Rect {
     Rect::new(body.x, body.y, body.width, 1)
 }
 
+/// The clickable ↻ refresh glyph in the Explorer header (rightmost header cell).
+pub(crate) fn source_panel_explorer_refresh_rect(area: Rect) -> Rect {
+    let header = source_panel_explorer_header_rect(area);
+    if header.width == 0 || header.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(header.x + header.width.saturating_sub(1), header.y, 1, 1)
+}
+
+/// The clickable collapse-all glyph in the Explorer header (the cell just left of
+/// the refresh glyph).
+pub(crate) fn source_panel_explorer_collapse_all_rect(area: Rect) -> Rect {
+    let header = source_panel_explorer_header_rect(area);
+    if header.width < 2 || header.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(header.x + header.width.saturating_sub(2), header.y, 1, 1)
+}
+
 /// The scrollable tree area of Explorer mode, below the workspace-name header.
 pub(crate) fn source_panel_explorer_tree_rect(area: Rect) -> Rect {
     let body = source_panel_body_rect(area);
@@ -734,13 +753,32 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
         .and_then(|idx| app.workspaces.get(idx))
         .map(|ws| ws.display_name())
         .unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            format!(" {name}"),
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-        )),
-        header,
-    );
+    // The two rightmost header cells carry the collapse-all and refresh controls;
+    // the workspace name fills the rest.
+    let label_width = header.width.saturating_sub(2);
+    if label_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {name}"),
+                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(header.x, header.y, label_width, 1),
+        );
+    }
+    let collapse_all = source_panel_explorer_collapse_all_rect(area);
+    if collapse_all != Rect::default() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("⊟", Style::default().fg(p.overlay0))),
+            collapse_all,
+        );
+    }
+    let refresh = source_panel_explorer_refresh_rect(area);
+    if refresh != Rect::default() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("↻", Style::default().fg(p.overlay0))),
+            refresh,
+        );
+    }
 
     let selected = source_panel_workspace_idx(app)
         .and_then(|idx| app.workspaces.get(idx))

@@ -166,6 +166,18 @@ impl AppState {
             && rect_contains(self.view.source_panel_changes_refresh_rect, col, row)
     }
 
+    /// True when `(col, row)` is on the Explorer header's ↻ refresh glyph.
+    pub(super) fn on_source_panel_explorer_refresh(&self, col: u16, row: u16) -> bool {
+        !self.source_panel_collapsed
+            && rect_contains(self.view.source_panel_explorer_refresh_rect, col, row)
+    }
+
+    /// True when `(col, row)` is on the Explorer header's collapse-all glyph.
+    pub(super) fn on_source_panel_explorer_collapse_all(&self, col: u16, row: u16) -> bool {
+        !self.source_panel_collapsed
+            && rect_contains(self.view.source_panel_explorer_collapse_all_rect, col, row)
+    }
+
     /// The `change_idx` of the changed-file row under `(col, row)`, if any.
     pub(super) fn source_panel_changed_file_at(&self, col: u16, row: u16) -> Option<usize> {
         self.view
@@ -211,6 +223,30 @@ impl AppState {
             }
         } else {
             self.open_file_in_editor_pane(terminal_runtimes, ws_idx, &path);
+        }
+    }
+
+    /// Force an immediate re-read of the panel's current workspace Explorer tree,
+    /// re-stating the currently-expanded directories so on-disk changes are
+    /// picked up on demand. A pure view operation with no filesystem mutation.
+    pub(crate) fn source_panel_explorer_refresh(&mut self) {
+        let Some(idx) = crate::ui::source_panel_workspace_idx(self) else {
+            return;
+        };
+        if let Some(ws) = self.workspaces.get_mut(idx) {
+            ws.explorer_refresh();
+        }
+    }
+
+    /// Collapse every expanded Explorer folder of the panel's current workspace,
+    /// resetting a deeply expanded tree back to its roots. A pure view operation
+    /// with no filesystem mutation.
+    pub(crate) fn source_panel_explorer_collapse_all(&mut self) {
+        let Some(idx) = crate::ui::source_panel_workspace_idx(self) else {
+            return;
+        };
+        if let Some(ws) = self.workspaces.get_mut(idx) {
+            ws.explorer_collapse_all();
         }
     }
 
@@ -1231,6 +1267,60 @@ mod tests {
         assert!(!app.workspaces[0].explorer_expanded.contains(&folder));
     }
 
+    #[test]
+    fn explorer_refresh_restats_the_current_workspace_tree() {
+        use crate::workspace::file_tree::FileTreeRow;
+        let base = std::env::temp_dir().join(format!(
+            "herdr-explorer-refresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.rs"), b"x").unwrap();
+        let mut ws = crate::workspace::Workspace::test_new("ws");
+        ws.explorer_set_root(base.clone());
+        let mut app = AppState::test_new();
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+
+        // A new file appears after the root was loaded.
+        std::fs::write(base.join("b.rs"), b"x").unwrap();
+
+        app.source_panel_explorer_refresh();
+
+        let names: Vec<String> = app.workspaces[0]
+            .explorer_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                FileTreeRow::Node(n) => Some(n.name),
+                FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(names.contains(&"b.rs".to_string()));
+    }
+
+    #[test]
+    fn collapse_all_clears_the_expanded_set() {
+        let mut app = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("ws");
+        ws.explorer_set_root(std::path::PathBuf::from("/root"));
+        // A deeply expanded tree: several folders in the expanded set.
+        ws.explorer_toggle_expand(std::path::Path::new("/root/src"));
+        ws.explorer_toggle_expand(std::path::Path::new("/root/src/app"));
+        ws.explorer_toggle_expand(std::path::Path::new("/root/docs"));
+        app.workspaces = vec![ws];
+        app.active = Some(0);
+        assert!(!app.workspaces[0].explorer_expanded.is_empty());
+
+        app.source_panel_explorer_collapse_all();
+
+        assert!(app.workspaces[0].explorer_expanded.is_empty());
+    }
+
     /// An app in Explorer mode whose current workspace holds an overflowing tree
     /// (60 files) seeded directly into the cache, with a panel rect set so the
     /// tree's scroll metrics resolve.
@@ -1340,6 +1430,32 @@ mod tests {
 
         app.source_panel_collapsed = true;
         assert!(!app.on_source_panel_changes_refresh(95, 0)); // ignored when collapsed
+    }
+
+    #[test]
+    fn explorer_collapse_all_hit_test_honors_collapsed_state() {
+        let mut app = AppState::test_new();
+        app.source_panel_collapsed = false;
+        app.view.source_panel_explorer_collapse_all_rect = Rect::new(94, 1, 1, 1);
+
+        assert!(app.on_source_panel_explorer_collapse_all(94, 1));
+        assert!(!app.on_source_panel_explorer_collapse_all(95, 1));
+
+        app.source_panel_collapsed = true;
+        assert!(!app.on_source_panel_explorer_collapse_all(94, 1)); // ignored when collapsed
+    }
+
+    #[test]
+    fn explorer_refresh_hit_test_honors_collapsed_state() {
+        let mut app = AppState::test_new();
+        app.source_panel_collapsed = false;
+        app.view.source_panel_explorer_refresh_rect = Rect::new(95, 1, 1, 1);
+
+        assert!(app.on_source_panel_explorer_refresh(95, 1));
+        assert!(!app.on_source_panel_explorer_refresh(94, 1));
+
+        app.source_panel_collapsed = true;
+        assert!(!app.on_source_panel_explorer_refresh(95, 1)); // ignored when collapsed
     }
 
     #[test]

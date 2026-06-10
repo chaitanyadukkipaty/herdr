@@ -467,6 +467,8 @@ impl App {
                 source_panel_log_refresh_rect: Rect::default(),
                 source_panel_load_more_rect: Rect::default(),
                 source_panel_explorer_node_areas: Vec::new(),
+                source_panel_explorer_refresh_rect: Rect::default(),
+                source_panel_explorer_collapse_all_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),

@@ -57,7 +57,8 @@ pub(crate) use self::source_panel::{
     compute_source_panel_load_more_rect, compute_source_panel_log_card_areas,
     compute_source_panel_mode_tab_areas, expanded_source_panel_toggle_rect,
     source_panel_changes_rect, source_panel_changes_refresh_rect,
-    source_panel_changes_scroll_metrics, source_panel_explorer_scroll_metrics,
+    source_panel_changes_scroll_metrics, source_panel_explorer_collapse_all_rect,
+    source_panel_explorer_refresh_rect, source_panel_explorer_scroll_metrics,
     source_panel_explorer_tree_rect, source_panel_graph_rect, source_panel_log_refresh_rect,
     source_panel_log_scroll_metrics, source_panel_section_divider_rect, source_panel_workspace_idx,
 };
@@ -325,6 +326,20 @@ fn compute_view_internal(
     let source_panel_explorer_node_areas =
         compute_source_panel_explorer_node_areas(app, source_panel_area);
 
+    // The Explorer header's refresh and collapse-all controls exist only in
+    // Explorer mode, so Source mode never grows phantom hit targets there.
+    let (source_panel_explorer_refresh_rect, source_panel_explorer_collapse_all_rect) =
+        if !source_panel_collapsed
+            && app.source_panel_mode() == crate::workspace::SourcePanelMode::Explorer
+        {
+            (
+                source_panel_explorer_refresh_rect(source_panel_area),
+                source_panel_explorer_collapse_all_rect(source_panel_area),
+            )
+        } else {
+            (Rect::default(), Rect::default())
+        };
+
     let tab_bar_view = app
         .active
         .and_then(|i| app.workspaces.get(i))
@@ -389,6 +404,8 @@ fn compute_view_internal(
         source_panel_log_refresh_rect,
         source_panel_load_more_rect,
         source_panel_explorer_node_areas,
+        source_panel_explorer_refresh_rect,
+        source_panel_explorer_collapse_all_rect,
         workspace_card_areas,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
@@ -469,6 +486,8 @@ fn compute_mobile_view(
         source_panel_log_refresh_rect: Rect::default(),
         source_panel_load_more_rect: Rect::default(),
         source_panel_explorer_node_areas: Vec::new(),
+        source_panel_explorer_refresh_rect: Rect::default(),
+        source_panel_explorer_collapse_all_rect: Rect::default(),
         workspace_card_areas: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
