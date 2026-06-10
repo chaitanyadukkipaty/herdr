@@ -516,6 +516,11 @@ impl App {
             source_panel_changes_scroll: 0,
             source_panel_log_scroll: 0,
             source_panel_diff_pane: None,
+            source_panel_editor_pane: None,
+            source_panel_editor: {
+                let editor = config.ui.source_panel_editor.trim();
+                (!editor.is_empty()).then(|| editor.to_string())
+            },
             source_panel_expanded_commits: std::collections::HashSet::new(),
             source_panel_commit_files: std::collections::HashMap::new(),
             source_panel_active_item: None,

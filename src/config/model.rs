@@ -435,6 +435,10 @@ pub struct UiConfig {
     pub source_panel_collapsed: bool,
     /// Ratio of source panel height given to the changes section. Default: 0.5.
     pub source_panel_section_split: f32,
+    /// Editor command the Explorer runs when a file row is clicked. When empty,
+    /// resolution falls back to `$VISUAL`, then `$EDITOR`, then `vi`. May carry
+    /// flags (e.g. `code -w`). Default: empty.
+    pub source_panel_editor: String,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
@@ -633,6 +637,7 @@ impl Default for UiConfig {
             source_panel_width: 26,
             source_panel_collapsed: false,
             source_panel_section_split: 0.5,
+            source_panel_editor: String::new(),
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
@@ -953,17 +958,21 @@ mobile_width_threshold = 96
         assert_eq!(default_config.ui.source_panel_width, 26);
         assert!(!default_config.ui.source_panel_collapsed);
         assert_eq!(default_config.ui.source_panel_section_split, 0.5);
+        // No editor configured by default → falls back to $VISUAL/$EDITOR/vi.
+        assert_eq!(default_config.ui.source_panel_editor, "");
 
         let toml = r#"
 [ui]
 source_panel_width = 30
 source_panel_collapsed = true
 source_panel_section_split = 0.7
+source_panel_editor = "hx"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.source_panel_width, 30);
         assert!(config.ui.source_panel_collapsed);
         assert_eq!(config.ui.source_panel_section_split, 0.7);
+        assert_eq!(config.ui.source_panel_editor, "hx");
     }
 
     #[test]

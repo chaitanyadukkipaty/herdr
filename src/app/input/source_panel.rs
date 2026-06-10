@@ -13,6 +13,16 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y + rect.height
 }
 
+/// Which of the source panel's two reuse-tracked preview panes a spawn/reuse
+/// targets. The diff pane shows git diffs/`git show`; the editor pane runs the
+/// Explorer's editor on a clicked file. They are tracked separately so opening a
+/// file never disturbs an open diff and vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourcePanelPaneSlot {
+    Diff,
+    Editor,
+}
+
 impl AppState {
     /// The source panel mode of the workspace the panel currently reflects.
     /// Defaults to `Source` when no workspace is selected.
@@ -177,10 +187,16 @@ impl AppState {
             .position(|area| rect_contains(area.rect, col, row))
     }
 
-    /// Handle a left-click on an Explorer tree row: select it (so the row
-    /// highlights), and — when it is a directory — toggle its expansion,
-    /// lazy-loading its children the first time. Files only select.
-    pub(super) fn click_explorer_node(&mut self, ws_idx: usize, node_idx: usize) {
+    /// Handle a left-click on an Explorer tree row: select it (so the row gets
+    /// the persistent highlight), then — when it is a directory — toggle its
+    /// expansion, lazy-loading its children the first time; when it is a file,
+    /// open it in the editor pane.
+    pub(super) fn click_explorer_node(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        ws_idx: usize,
+        node_idx: usize,
+    ) {
         let Some(area) = self.view.source_panel_explorer_node_areas.get(node_idx) else {
             return;
         };
@@ -188,9 +204,13 @@ impl AppState {
         let expandable = area.expandable;
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
             ws.explorer_select(path.clone());
-            if expandable {
+        }
+        if expandable {
+            if let Some(ws) = self.workspaces.get_mut(ws_idx) {
                 ws.explorer_toggle_expand(&path);
             }
+        } else {
+            self.open_file_in_editor_pane(terminal_runtimes, ws_idx, &path);
         }
     }
 
@@ -284,6 +304,22 @@ impl AppState {
         Some((target.id, direction))
     }
 
+    /// The pane id currently tracked in `slot` (the diff pane or the editor pane).
+    fn source_panel_pane(&self, slot: SourcePanelPaneSlot) -> Option<PaneId> {
+        match slot {
+            SourcePanelPaneSlot::Diff => self.source_panel_diff_pane,
+            SourcePanelPaneSlot::Editor => self.source_panel_editor_pane,
+        }
+    }
+
+    /// Remember `pane` as the pane tracked in `slot`.
+    fn set_source_panel_pane(&mut self, slot: SourcePanelPaneSlot, pane: Option<PaneId>) {
+        match slot {
+            SourcePanelPaneSlot::Diff => self.source_panel_diff_pane = pane,
+            SourcePanelPaneSlot::Editor => self.source_panel_editor_pane = pane,
+        }
+    }
+
     /// Replace the source panel's diff pane content with `argv` (a `git
     /// diff`/`git show` command) when that pane is still open in the active tab,
     /// or spawn a fresh pane beside the largest one otherwise. `source_cwd` is
@@ -295,20 +331,65 @@ impl AppState {
         argv: &[String],
         source_cwd: &std::path::Path,
     ) -> bool {
-        self.reuse_source_panel_diff_pane(terminal_runtimes, argv)
-            || self.spawn_source_panel_diff_pane(terminal_runtimes, argv, source_cwd)
+        self.show_in_source_panel_pane(
+            terminal_runtimes,
+            argv,
+            source_cwd,
+            SourcePanelPaneSlot::Diff,
+        )
     }
 
-    /// Re-run `argv` inside the existing source-panel diff pane, replacing its
-    /// content in place. Fails (so the caller spawns a fresh pane) when there is
-    /// no remembered diff pane, it has been closed, or it no longer lives in the
-    /// active workspace's active tab.
+    /// Replace the source panel's `slot` pane content with `argv` when that pane
+    /// is still open in the active tab, or spawn a fresh pane beside the largest
+    /// one otherwise. Drives both the diff pane (git diff/show) and the editor
+    /// pane (Explorer file open); the two are tracked in separate slots so
+    /// neither disturbs the other. Returns `true` when a pane showed the output.
+    fn show_in_source_panel_pane(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        argv: &[String],
+        source_cwd: &std::path::Path,
+        slot: SourcePanelPaneSlot,
+    ) -> bool {
+        self.reuse_source_panel_pane(terminal_runtimes, argv, slot)
+            || self.spawn_source_panel_pane(terminal_runtimes, argv, source_cwd, slot)
+    }
+
+    /// Re-run `argv` inside the existing source-panel diff pane (see
+    /// [`Self::reuse_source_panel_pane`]). A named, slot-fixed entry point for the
+    /// reuse tests, which assert the decline path without driving a real spawn.
+    #[cfg(test)]
     fn reuse_source_panel_diff_pane(
         &mut self,
         terminal_runtimes: &mut TerminalRuntimeRegistry,
         argv: &[String],
     ) -> bool {
-        let Some(pane_id) = self.source_panel_diff_pane else {
+        self.reuse_source_panel_pane(terminal_runtimes, argv, SourcePanelPaneSlot::Diff)
+    }
+
+    /// Re-run `argv` inside the existing source-panel editor pane (see
+    /// [`Self::reuse_source_panel_pane`]). A named, slot-fixed entry point for the
+    /// reuse tests, which assert the decline path without driving a real spawn.
+    #[cfg(test)]
+    fn reuse_source_panel_editor_pane(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        argv: &[String],
+    ) -> bool {
+        self.reuse_source_panel_pane(terminal_runtimes, argv, SourcePanelPaneSlot::Editor)
+    }
+
+    /// Re-run `argv` inside the existing source-panel `slot` pane, replacing its
+    /// content in place. Fails (so the caller spawns a fresh pane) when that slot
+    /// has no remembered pane, it has been closed, or it no longer lives in the
+    /// active workspace's active tab.
+    fn reuse_source_panel_pane(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        argv: &[String],
+        slot: SourcePanelPaneSlot,
+    ) -> bool {
+        let Some(pane_id) = self.source_panel_pane(slot) else {
             return false;
         };
         let Some(active_idx) = self.active else {
@@ -376,13 +457,14 @@ impl AppState {
     }
 
     /// Spawn a fresh pane running `argv`, splitting the largest pane in the
-    /// active tab, and remember it as the source panel's diff pane so later
-    /// clicks replace its content instead of splitting again.
-    fn spawn_source_panel_diff_pane(
+    /// active tab, and remember it in `slot` so later clicks replace its content
+    /// instead of splitting again.
+    fn spawn_source_panel_pane(
         &mut self,
         terminal_runtimes: &mut TerminalRuntimeRegistry,
         argv: &[String],
         source_cwd: &std::path::Path,
+        slot: SourcePanelPaneSlot,
     ) -> bool {
         let Some(active_idx) = self.active else {
             return false;
@@ -429,7 +511,7 @@ impl AppState {
         self.terminals
             .insert(new_pane.terminal.id.clone(), new_pane.terminal);
         self.record_pane_focus_change(previous_focus, active_idx, new_id);
-        self.source_panel_diff_pane = Some(new_id);
+        self.set_source_panel_pane(slot, Some(new_id));
         self.mark_session_dirty();
         self.mode = Mode::Terminal;
         true
@@ -462,6 +544,42 @@ impl AppState {
             self.source_panel_active_item = Some(SourcePanelActiveItem::WorkingFile(change.path));
         }
         shown
+    }
+
+    /// Resolve the editor command the Explorer runs on a clicked file, applying
+    /// the precedence `ui.source_panel_editor` → `$VISUAL` → `$EDITOR` → `vi`.
+    fn resolve_source_panel_editor(&self) -> String {
+        let visual = std::env::var("VISUAL").ok();
+        let editor = std::env::var("EDITOR").ok();
+        crate::workspace::resolve_editor_command(
+            self.source_panel_editor.as_deref(),
+            visual.as_deref(),
+            editor.as_deref(),
+        )
+    }
+
+    /// Open `path` in the editor pane: resolve the editor command and run it on
+    /// the file in a terminal pane, reusing the tracked editor pane when one is
+    /// open (killing and respawning it) or spawning a fresh one otherwise. The
+    /// editor command is not pager-wrapped — an editor manages its own screen.
+    /// `ws_idx` is the workspace whose Explorer row was clicked, used only as a
+    /// fallback working directory for a freshly spawned pane. Returns `true` when
+    /// a pane opened the file.
+    pub(super) fn open_file_in_editor_pane(
+        &mut self,
+        terminal_runtimes: &mut TerminalRuntimeRegistry,
+        ws_idx: usize,
+        path: &std::path::Path,
+    ) -> bool {
+        let cwd = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.resolved_identity_cwd_from(&self.terminals, terminal_runtimes))
+            .or_else(|| path.parent().map(std::path::Path::to_path_buf))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let editor = self.resolve_source_panel_editor();
+        let argv = crate::workspace::editor_open_argv(&editor, path);
+        self.show_in_source_panel_pane(terminal_runtimes, &argv, &cwd, SourcePanelPaneSlot::Editor)
     }
 
     /// True when `(col, row)` is on the Graph header's ↻ refresh glyph.
@@ -942,6 +1060,36 @@ mod tests {
     }
 
     #[test]
+    fn reuse_editor_pane_declines_when_none_is_tracked() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("ws")];
+        app.active = Some(0);
+        let mut runtimes = TerminalRuntimeRegistry::new();
+
+        // No editor pane remembered → the caller falls through to spawning one.
+        assert!(!app.reuse_source_panel_editor_pane(&mut runtimes, &["sh".to_string()]));
+    }
+
+    #[test]
+    fn editor_pane_is_tracked_separately_from_the_diff_pane() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("ws")];
+        app.active = Some(0);
+        // A live diff pane must never be reused as the editor pane: the editor
+        // reuse reads its own slot, so an open git diff is left untouched when a
+        // file is opened (and vice versa).
+        app.source_panel_diff_pane = Some(crate::layout::PaneId::from_raw(99_999));
+        let mut runtimes = TerminalRuntimeRegistry::new();
+
+        assert!(!app.reuse_source_panel_editor_pane(&mut runtimes, &["sh".to_string()]));
+        // The diff pane slot is untouched by the editor-reuse attempt.
+        assert_eq!(
+            app.source_panel_diff_pane,
+            Some(crate::layout::PaneId::from_raw(99_999))
+        );
+    }
+
+    #[test]
     fn scroll_changes_advances_then_clamps_to_top() {
         let mut app = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("ws");
@@ -1062,6 +1210,7 @@ mod tests {
         ws.explorer_set_root(std::path::PathBuf::from("/root"));
         app.workspaces = vec![ws];
         app.active = Some(0);
+        let mut runtimes = TerminalRuntimeRegistry::new();
         let folder = std::path::PathBuf::from("/root/src");
         app.view.source_panel_explorer_node_areas = vec![SourcePanelExplorerNodeArea {
             rect: Rect::new(71, 2, 24, 1),
@@ -1070,7 +1219,7 @@ mod tests {
         }];
 
         // First click expands and selects the folder.
-        app.click_explorer_node(0, 0);
+        app.click_explorer_node(&mut runtimes, 0, 0);
         assert!(app.workspaces[0].explorer_expanded.contains(&folder));
         assert_eq!(
             app.workspaces[0].explorer_selected(),
@@ -1078,7 +1227,7 @@ mod tests {
         );
 
         // A second click collapses it again (the expanded set is mutated back).
-        app.click_explorer_node(0, 0);
+        app.click_explorer_node(&mut runtimes, 0, 0);
         assert!(!app.workspaces[0].explorer_expanded.contains(&folder));
     }
 
@@ -1135,13 +1284,17 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_file_selects_without_expanding() {
+    fn clicking_a_file_selects_and_does_not_expand() {
         use crate::app::state::SourcePanelExplorerNodeArea;
         let mut app = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("ws");
         ws.explorer_set_root(std::path::PathBuf::from("/root"));
         app.workspaces = vec![ws];
-        app.active = Some(0);
+        // No active workspace, so the file-open's pane spawn (the manually-verified
+        // adapter) is a no-op here and the test stays a pure selection check: a
+        // file click sets the persistent highlight and never enters the expand set.
+        app.active = None;
+        let mut runtimes = TerminalRuntimeRegistry::new();
         let file = std::path::PathBuf::from("/root/README.md");
         app.view.source_panel_explorer_node_areas = vec![SourcePanelExplorerNodeArea {
             rect: Rect::new(71, 2, 24, 1),
@@ -1149,7 +1302,7 @@ mod tests {
             expandable: false,
         }];
 
-        app.click_explorer_node(0, 0);
+        app.click_explorer_node(&mut runtimes, 0, 0);
 
         assert_eq!(app.workspaces[0].explorer_selected(), Some(file.as_path()));
         assert!(app.workspaces[0].explorer_expanded.is_empty());

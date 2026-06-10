@@ -55,6 +55,42 @@ pub fn rollup_git_status(
     decorations
 }
 
+/// Resolve the editor command used to open a clicked Explorer file, following
+/// the precedence `source_panel.editor` → `$VISUAL` → `$EDITOR` → `vi`. Each
+/// candidate is taken in order and the first non-blank one wins; a blank or
+/// whitespace-only value is treated as unset and skipped. Pure over its inputs
+/// (the caller reads the config and environment) so it is testable without
+/// touching the real environment.
+pub fn resolve_editor_command(
+    configured: Option<&str>,
+    visual: Option<&str>,
+    editor: Option<&str>,
+) -> String {
+    [configured, visual, editor]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|candidate| !candidate.is_empty())
+        .unwrap_or("vi")
+        .to_string()
+}
+
+/// Build the argv that opens `path` in `editor` inside a terminal pane. Like the
+/// diff/commit commands it runs through `sh -c` so an editor invocation carrying
+/// flags (`code -w`, `emacsclient -t`) works, but — unlike them — it is never
+/// piped into a pager, since an editor manages its own screen. The file is passed
+/// as the `$1` positional parameter so paths with spaces or shell metacharacters
+/// are never re-parsed by the shell.
+pub fn editor_open_argv(editor: &str, path: &Path) -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!("{editor} \"$1\""),
+        "sh".into(),
+        path.to_string_lossy().into_owned(),
+    ]
+}
+
 /// What kind of filesystem object a tree entry is. Symlinks are a distinct
 /// variant — they are shown in the tree but never followed, so a symlink to a
 /// directory is a non-expandable leaf and the tree never recurses into it
@@ -488,5 +524,54 @@ mod tests {
         // Directories first (docs, src — case-insensitive), then files
         // (Cargo.toml, README.md — case-insensitive).
         assert_eq!(names, vec!["docs", "src", "Cargo.toml", "README.md"]);
+    }
+
+    #[test]
+    fn editor_resolution_prefers_configured_then_visual_then_editor_then_vi() {
+        // Configured `source_panel.editor` wins over everything.
+        assert_eq!(
+            resolve_editor_command(Some("hx"), Some("nvim"), Some("nano")),
+            "hx"
+        );
+        // No configured editor → $VISUAL.
+        assert_eq!(
+            resolve_editor_command(None, Some("nvim"), Some("nano")),
+            "nvim"
+        );
+        // No configured editor and no $VISUAL → $EDITOR.
+        assert_eq!(resolve_editor_command(None, None, Some("nano")), "nano");
+        // Nothing set → vi.
+        assert_eq!(resolve_editor_command(None, None, None), "vi");
+        // Blank values are treated as unset and skipped.
+        assert_eq!(
+            resolve_editor_command(Some("  "), Some(""), Some("nano")),
+            "nano"
+        );
+    }
+
+    #[test]
+    fn editor_open_argv_runs_the_editor_on_the_file_without_a_pager() {
+        let argv = editor_open_argv("nvim", Path::new("/repo/src/main.rs"));
+
+        // Runs through `sh -c` so an editor command with flags (e.g. `code -w`)
+        // works, but — unlike the diff/commit commands — is never piped into a
+        // pager: an editor manages its own screen.
+        assert_eq!(argv[0], "sh");
+        assert_eq!(argv[1], "-c");
+        let script = &argv[2];
+        assert!(script.contains("nvim"), "script should invoke the editor");
+        assert!(
+            !script.contains("less") && !script.to_lowercase().contains("pager"),
+            "editor command must not be wrapped in a pager: {script}"
+        );
+        // The file is passed as a positional parameter, not interpolated into the
+        // script, so paths with spaces or shell metacharacters are safe.
+        assert_eq!(argv.last().map(String::as_str), Some("/repo/src/main.rs"));
+    }
+
+    #[test]
+    fn editor_open_argv_preserves_editor_flags() {
+        let argv = editor_open_argv("code -w", Path::new("/repo/a.txt"));
+        assert!(argv[2].contains("code -w"));
     }
 }

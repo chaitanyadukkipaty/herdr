@@ -24,7 +24,9 @@ mod tab;
 use self::git::git_ahead_behind;
 pub(crate) use self::git::{commit_files_for_cwd, DEFAULT_LOADED_COMMIT_COUNT};
 pub use self::{
-    file_tree::{FileEntryKind, FileTreeEntry, FileTreeRow},
+    file_tree::{
+        editor_open_argv, resolve_editor_command, FileEntryKind, FileTreeEntry, FileTreeRow,
+    },
     git::{
         changed_file_diff_argv, commit_file_diff_argv, commit_show_argv, derive_label_from_cwd,
         git_branch, git_space_metadata, git_status_cache_key, ChangeStatus, ChangedFile,

@@ -1445,6 +1445,14 @@ pub struct AppState {
     /// file or commit replaces this pane's content instead of splitting a new
     /// one; `None` (or a since-closed pane) spawns a fresh pane.
     pub source_panel_diff_pane: Option<PaneId>,
+    /// Pane currently running the Explorer's editor on a clicked file. Tracked
+    /// separately from `source_panel_diff_pane` so opening a file leaves an open
+    /// git diff intact and vice versa; clicking another file kills and respawns
+    /// this pane rather than splitting a new one.
+    pub source_panel_editor_pane: Option<PaneId>,
+    /// Editor command the Explorer runs on a clicked file, from
+    /// `ui.source_panel_editor`. Empty/unset falls back to `$VISUAL`/`$EDITOR`/`vi`.
+    pub source_panel_editor: Option<String>,
     /// Shas of commits expanded inline in the Graph section to reveal the files
     /// they touched. Several may be expanded at once.
     pub source_panel_expanded_commits: std::collections::HashSet<String>,
@@ -1814,6 +1822,8 @@ impl AppState {
             source_panel_changes_scroll: 0,
             source_panel_log_scroll: 0,
             source_panel_diff_pane: None,
+            source_panel_editor_pane: None,
+            source_panel_editor: None,
             source_panel_expanded_commits: std::collections::HashSet::new(),
             source_panel_commit_files: std::collections::HashMap::new(),
             source_panel_active_item: None,
