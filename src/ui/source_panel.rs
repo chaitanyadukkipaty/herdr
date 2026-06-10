@@ -614,14 +614,14 @@ pub(crate) fn source_panel_explorer_refresh_rect(area: Rect) -> Rect {
     Rect::new(header.x + header.width.saturating_sub(1), header.y, 1, 1)
 }
 
-/// The clickable collapse-all glyph in the Explorer header (the cell just left of
-/// the refresh glyph).
+/// The clickable collapse-all glyph in the Explorer header, separated from the
+/// refresh glyph by a blank cell (so it sits two cells left of the right edge).
 pub(crate) fn source_panel_explorer_collapse_all_rect(area: Rect) -> Rect {
     let header = source_panel_explorer_header_rect(area);
-    if header.width < 2 || header.height == 0 {
+    if header.width < 3 || header.height == 0 {
         return Rect::default();
     }
-    Rect::new(header.x + header.width.saturating_sub(2), header.y, 1, 1)
+    Rect::new(header.x + header.width.saturating_sub(3), header.y, 1, 1)
 }
 
 /// The scrollable tree area of Explorer mode, below the workspace-name header.
@@ -753,9 +753,9 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
         .and_then(|idx| app.workspaces.get(idx))
         .map(|ws| ws.display_name())
         .unwrap_or_default();
-    // The two rightmost header cells carry the collapse-all and refresh controls;
-    // the workspace name fills the rest.
-    let label_width = header.width.saturating_sub(2);
+    // The three rightmost header cells carry the collapse-all control, a blank
+    // separator, and the refresh control; the workspace name fills the rest.
+    let label_width = header.width.saturating_sub(3);
     if label_width > 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(
