@@ -749,12 +749,22 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
     if header == Rect::default() {
         return;
     }
+    // Label the header from the directory the tree is actually rooted at, so it
+    // can never disagree with the tree below it. The root is the live-resolved
+    // identity cwd (set in the layout pass); `display_name` is only a fallback for
+    // the brief window before the tree is rooted, and it resolves the cwd without
+    // live runtimes, so it can name a different directory than the tree shows.
     let name = source_panel_workspace_idx(app)
         .and_then(|idx| app.workspaces.get(idx))
-        .map(|ws| ws.display_name())
+        .map(|ws| {
+            ws.explorer_root
+                .as_deref()
+                .and_then(|root| root.file_name().and_then(|n| n.to_str()).map(str::to_string))
+                .unwrap_or_else(|| ws.display_name())
+        })
         .unwrap_or_default();
     // The three rightmost header cells carry the collapse-all control, a blank
-    // separator, and the refresh control; the workspace name fills the rest.
+    // separator, and the refresh control; the directory name fills the rest.
     let label_width = header.width.saturating_sub(3);
     if label_width > 0 {
         frame.render_widget(
