@@ -106,6 +106,15 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// The Explorer's filesystem watcher coalesced one or more on-disk changes
+    /// (create/delete/rename) under a watched directory. Delivered on the main
+    /// loop so the tree is only ever mutated there — the watcher thread never
+    /// touches shared state directly. `root` identifies the workspace whose tree
+    /// is rooted there; `paths` are the changed entry paths the watcher reported.
+    ExplorerFsChanged {
+        root: std::path::PathBuf,
+        paths: Vec<std::path::PathBuf>,
+    },
     /// Background `git worktree add` completed.
     WorktreeAddFinished(WorktreeAddResult),
     /// Background `git worktree remove` completed.

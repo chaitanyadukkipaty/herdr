@@ -56,6 +56,14 @@ impl App {
             return;
         }
 
+        if let AppEvent::ExplorerFsChanged { root, paths } = &ev {
+            if self.state.apply_explorer_fs_change(root, paths) {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(result);
             return;

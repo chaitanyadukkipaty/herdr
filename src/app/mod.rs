@@ -11,6 +11,7 @@ mod api;
 mod api_helpers;
 mod config_io;
 mod creation;
+mod explorer_watcher;
 mod ids;
 mod input;
 mod runtime;
@@ -122,6 +123,11 @@ pub struct App {
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) local_terminal_notifications: bool,
     pub(crate) config_reloaded_from_disk: bool,
+    /// Live filesystem watcher for the active workspace's Explorer tree, bound to
+    /// that tree's root. `None` when no Explorer tree is showing (Source mode, no
+    /// rooted tree) or when a watcher could not be created. Reconciled each tick
+    /// against the expanded directories by `sync_explorer_watches`.
+    pub(crate) explorer_watcher: Option<explorer_watcher::ExplorerWatcher>,
     prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
 
@@ -638,6 +644,7 @@ impl App {
             overlay_panes: HashMap::new(),
             local_terminal_notifications: true,
             config_reloaded_from_disk: false,
+            explorer_watcher: None,
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
     }

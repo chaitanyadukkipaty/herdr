@@ -252,6 +252,8 @@ impl App {
 
         self.start_git_status_refresh_if_due(now);
 
+        self.sync_explorer_watches();
+
         if self
             .next_auto_update_check
             .is_some_and(|deadline| now >= deadline)
@@ -449,6 +451,37 @@ impl App {
 
         let update_tx = self.event_tx.clone();
         std::thread::spawn(move || crate::update::auto_update(update_tx));
+    }
+
+    /// Reconcile the Explorer's filesystem watcher with the directory tree the
+    /// source panel is currently showing: while a workspace's Explorer tree is
+    /// rooted, watch its root plus every expanded folder (non-recursively),
+    /// rebuilding the watcher when the shown root changes and dropping it entirely
+    /// when no Explorer tree is showing. Called each loop tick — cheap when
+    /// nothing changed because the watch set is diffed against what is desired.
+    pub(crate) fn sync_explorer_watches(&mut self) {
+        let target = crate::ui::source_panel_workspace_idx(&self.state)
+            .and_then(|idx| self.state.workspaces.get(idx))
+            .filter(|ws| ws.source_panel_mode() == crate::workspace::SourcePanelMode::Explorer)
+            .and_then(|ws| ws.explorer_watch_state());
+
+        let Some((root, expanded)) = target else {
+            // Source mode, or no rooted tree: drop every watch.
+            self.explorer_watcher = None;
+            return;
+        };
+
+        // Re-root: a different tree is showing, so the old watcher (bound to the
+        // previous root) is replaced.
+        if self.explorer_watcher.as_ref().map(|w| w.root()) != Some(root.as_path()) {
+            self.explorer_watcher =
+                super::explorer_watcher::ExplorerWatcher::new(self.event_tx.clone(), root.clone());
+        }
+
+        if let Some(watcher) = self.explorer_watcher.as_mut() {
+            let desired = crate::workspace::file_tree::watch_targets(Some(&root), &expanded);
+            watcher.reconcile(&desired);
+        }
     }
 
     pub(crate) fn start_git_status_refresh_if_due(&mut self, now: Instant) {

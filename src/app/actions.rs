@@ -2491,7 +2491,31 @@ impl AppState {
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
+            // Intercepted in `App::handle_internal_event`, which applies the
+            // change and marks a redraw; this no-op arm keeps the match
+            // exhaustive (mirrors `GitStatusRefreshed`).
+            AppEvent::ExplorerFsChanged { .. } => Vec::new(),
         }
+    }
+
+    /// Apply a coalesced Explorer filesystem-watcher event to the workspace whose
+    /// tree is rooted at `root`, re-stating the loaded directories that contain
+    /// the `paths` the watcher reported. Returns true if any cached directory was
+    /// reloaded (so the caller can mark a redraw). A change for a `root` no longer
+    /// matching any workspace (the tree was re-rooted) is harmlessly ignored.
+    pub fn apply_explorer_fs_change(
+        &mut self,
+        root: &std::path::Path,
+        paths: &[std::path::PathBuf],
+    ) -> bool {
+        let Some(ws) = self
+            .workspaces
+            .iter_mut()
+            .find(|ws| ws.explorer_root.as_deref() == Some(root))
+        else {
+            return false;
+        };
+        ws.explorer_apply_changed_paths(paths)
     }
 
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
@@ -2851,6 +2875,49 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use ratatui::layout::Direction;
+
+    #[test]
+    fn explorer_fs_change_reloads_the_matching_workspace_tree_by_root() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "herdr-app-explorer-fs-{}-{}",
+            std::process::id(),
+            nanos,
+        ));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("README.md"), b"x").unwrap();
+
+        let mut state = app_with_workspaces(&["ws"]);
+        let src = base.join("src");
+        state.workspaces[0].explorer_set_root(base.clone());
+        state.workspaces[0].explorer_toggle_expand(&src);
+
+        // A file appears on disk inside the watched, expanded folder.
+        std::fs::write(src.join("new.rs"), b"x").unwrap();
+
+        // The watcher event, addressed to this workspace's root, re-stats the
+        // affected directory so the new file shows up.
+        let reloaded = state.apply_explorer_fs_change(&base, &[src.join("new.rs")]);
+        assert!(reloaded);
+        let names: Vec<String> = state.workspaces[0]
+            .explorer_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                crate::workspace::FileTreeRow::Node(n) => Some(n.name),
+                crate::workspace::FileTreeRow::Empty { .. } => None,
+            })
+            .collect();
+        assert!(names.contains(&"new.rs".to_string()));
+
+        // An event for a root that matches no workspace is harmlessly ignored.
+        let other = base.join("elsewhere");
+        assert!(!state.apply_explorer_fs_change(&other, &[other.join("x.rs")]));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn app_with_workspaces(names: &[&str]) -> AppState {
         let mut state = AppState::test_new();

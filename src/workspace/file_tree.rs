@@ -91,6 +91,37 @@ pub fn editor_open_argv(editor: &str, path: &Path) -> Vec<String> {
     ]
 }
 
+/// The directories the Explorer's non-recursive filesystem watcher should be
+/// watching: the tree root (always watched while a tree is rooted) plus every
+/// currently-expanded folder. Changes inside a collapsed folder are picked up by
+/// the re-read that happens when it is next expanded, so collapsed folders are
+/// deliberately left unwatched. Pure over its inputs — reads no filesystem and
+/// touches no watch handles.
+pub fn watch_targets(root: Option<&Path>, expanded: &HashSet<PathBuf>) -> HashSet<PathBuf> {
+    let mut targets: HashSet<PathBuf> = expanded.iter().cloned().collect();
+    if let Some(root) = root {
+        targets.insert(root.to_path_buf());
+    }
+    targets
+}
+
+/// Diff the watcher's `currently_watched` set against the `desired` set
+/// ([`watch_targets`]) to drive a non-recursive watcher so it tracks exactly the
+/// expanded tree: a folder gains a watch when it is expanded and drops it when it
+/// is collapsed. Returns `(to_add, to_drop)` — paths in `desired` but not yet
+/// watched, and paths watched but no longer desired. Both vectors are sorted so
+/// the reconciliation is deterministic. Pure over its inputs.
+pub fn reconcile_watches(
+    desired: &HashSet<PathBuf>,
+    currently_watched: &HashSet<PathBuf>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut to_add: Vec<PathBuf> = desired.difference(currently_watched).cloned().collect();
+    let mut to_drop: Vec<PathBuf> = currently_watched.difference(desired).cloned().collect();
+    to_add.sort();
+    to_drop.sort();
+    (to_add, to_drop)
+}
+
 /// What kind of filesystem object a tree entry is. Symlinks are a distinct
 /// variant — they are shown in the tree but never followed, so a symlink to a
 /// directory is a non-expandable leaf and the tree never recurses into it
@@ -573,5 +604,66 @@ mod tests {
     fn editor_open_argv_preserves_editor_flags() {
         let argv = editor_open_argv("code -w", Path::new("/repo/a.txt"));
         assert!(argv[2].contains("code -w"));
+    }
+
+    #[test]
+    fn watch_targets_always_includes_the_root_plus_every_expanded_folder() {
+        let root = PathBuf::from("/root");
+        let src = root.join("src");
+        let app = src.join("app");
+        let mut expanded = HashSet::new();
+        expanded.insert(src.clone());
+        expanded.insert(app.clone());
+
+        let targets = watch_targets(Some(&root), &expanded);
+
+        // The root is watched even though it is not in the expanded set, and each
+        // expanded folder is watched so changes inside it are seen live.
+        assert!(targets.contains(&root));
+        assert!(targets.contains(&src));
+        assert!(targets.contains(&app));
+        assert_eq!(targets.len(), 3);
+
+        // A collapsed folder (never expanded) is not a watch target — its changes
+        // are picked up by the re-read on next expand.
+        assert!(!targets.contains(&root.join("docs")));
+    }
+
+    #[test]
+    fn watch_targets_is_empty_when_no_tree_is_rooted() {
+        assert!(watch_targets(None, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn reconcile_watches_adds_newly_expanded_and_drops_collapsed_folders() {
+        let root = PathBuf::from("/root");
+        let src = root.join("src");
+        let docs = root.join("docs");
+
+        // Currently watching root + docs; the user has just collapsed docs and
+        // expanded src, so the desired set is root + src.
+        let mut watched = HashSet::new();
+        watched.insert(root.clone());
+        watched.insert(docs.clone());
+        let mut desired = HashSet::new();
+        desired.insert(root.clone());
+        desired.insert(src.clone());
+
+        let (to_add, to_drop) = reconcile_watches(&desired, &watched);
+
+        assert_eq!(to_add, vec![src]);
+        assert_eq!(to_drop, vec![docs]);
+    }
+
+    #[test]
+    fn reconcile_watches_is_a_no_op_when_the_sets_already_match() {
+        let root = PathBuf::from("/root");
+        let mut set = HashSet::new();
+        set.insert(root.clone());
+        set.insert(root.join("src"));
+
+        let (to_add, to_drop) = reconcile_watches(&set, &set);
+        assert!(to_add.is_empty());
+        assert!(to_drop.is_empty());
     }
 }
