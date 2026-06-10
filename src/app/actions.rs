@@ -2499,10 +2499,15 @@ impl AppState {
     }
 
     /// Apply a coalesced Explorer filesystem-watcher event to the workspace whose
-    /// tree is rooted at `root`, re-stating the loaded directories that contain
-    /// the `paths` the watcher reported. Returns true if any cached directory was
-    /// reloaded (so the caller can mark a redraw). A change for a `root` no longer
-    /// matching any workspace (the tree was re-rooted) is harmlessly ignored.
+    /// tree is rooted at `root` by re-stating its watched directories (root plus
+    /// expanded folders). Returns true if any listing actually changed (so the
+    /// caller can mark a redraw). A change for a `root` no longer matching any
+    /// workspace (the tree was re-rooted) is harmlessly ignored.
+    ///
+    /// The reported `paths` are deliberately *not* used to target the reload:
+    /// macOS FSEvents canonicalizes them (`/var` → `/private/var`, symlinks
+    /// resolved), so they often don't string-match our cache keys. The `root` tag
+    /// is our own stored value, so the workspace lookup stays exact.
     pub fn apply_explorer_fs_change(
         &mut self,
         root: &std::path::Path,
@@ -2515,7 +2520,8 @@ impl AppState {
         else {
             return false;
         };
-        ws.explorer_apply_changed_paths(paths)
+        tracing::trace!(?root, ?paths, "explorer fs change: re-stating watched dirs");
+        ws.explorer_refresh()
     }
 
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
@@ -2898,9 +2904,14 @@ mod tests {
         // A file appears on disk inside the watched, expanded folder.
         std::fs::write(src.join("new.rs"), b"x").unwrap();
 
-        // The watcher event, addressed to this workspace's root, re-stats the
-        // affected directory so the new file shows up.
-        let reloaded = state.apply_explorer_fs_change(&base, &[src.join("new.rs")]);
+        // The watcher event is addressed to this workspace's root, but its
+        // reported path is deliberately a NON-matching, canonicalized-looking
+        // path (as macOS FSEvents emits, e.g. /private/var/… vs /var/…). The
+        // reload must not depend on that path string-matching the cache keys —
+        // it re-stats the watched dirs by root — so the new file still shows up.
+        let canonicalized_decoy =
+            std::path::PathBuf::from("/private").join(src.strip_prefix("/").unwrap_or(&src));
+        let reloaded = state.apply_explorer_fs_change(&base, &[canonicalized_decoy.join("new.rs")]);
         assert!(reloaded);
         let names: Vec<String> = state.workspaces[0]
             .explorer_rows()

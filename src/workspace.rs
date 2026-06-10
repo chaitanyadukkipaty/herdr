@@ -796,15 +796,22 @@ impl Workspace {
     /// currently-expanded directory so on-disk changes (entries added, removed,
     /// or renamed while the folder was open) are picked up on demand. Collapsed
     /// folders are intentionally left stale — they are re-read when next
-    /// expanded. A pure view operation: it reads the filesystem but mutates
-    /// nothing on disk, and leaves the `expanded` set untouched.
-    pub fn explorer_refresh(&mut self) {
+    /// expanded. Returns true if any directory's listing actually changed, so a
+    /// watcher-driven refresh can skip a redraw when nothing moved. A pure view
+    /// operation: it reads the filesystem but mutates nothing on disk, and leaves
+    /// the `expanded` set untouched.
+    pub fn explorer_refresh(&mut self) -> bool {
         let mut dirs: Vec<PathBuf> = self.explorer_root.iter().cloned().collect();
         dirs.extend(self.explorer_expanded.iter().cloned());
+        let mut changed = false;
         for dir in dirs {
             let entries = file_tree::read_dir_sorted(&dir);
+            if self.explorer_cache.get(&dir) != Some(&entries) {
+                changed = true;
+            }
             self.explorer_cache.insert(dir, entries);
         }
+        changed
     }
 
     /// The inputs the Explorer's non-recursive filesystem watcher needs to track
@@ -816,34 +823,6 @@ impl Workspace {
     ) -> Option<(PathBuf, std::collections::HashSet<PathBuf>)> {
         let root = self.explorer_root.clone()?;
         Some((root, self.explorer_expanded.clone()))
-    }
-
-    /// Apply a filesystem-watcher event naming the `changed` paths to the loaded
-    /// tree. For each changed path the directory that would contain it is
-    /// re-read — the path itself when it is a loaded directory, otherwise its
-    /// parent — but only when that directory is already in the cache (the root or
-    /// a currently/previously expanded folder). Paths under directories that were
-    /// never loaded are ignored, so a stray event for a collapsed or unrelated
-    /// subtree does no work and never re-reads it into existence. Returns true if
-    /// any cached directory was reloaded, so the caller can mark a redraw. The
-    /// `expanded` set is left untouched — this only re-stats already-loaded dirs.
-    pub fn explorer_apply_changed_paths(&mut self, changed: &[PathBuf]) -> bool {
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        for path in changed {
-            for candidate in [Some(path.as_path()), path.parent()].into_iter().flatten() {
-                if self.explorer_cache.contains_key(candidate)
-                    && !dirs.iter().any(|d| d.as_path() == candidate)
-                {
-                    dirs.push(candidate.to_path_buf());
-                }
-            }
-        }
-        let reloaded = !dirs.is_empty();
-        for dir in dirs {
-            let entries = file_tree::read_dir_sorted(&dir);
-            self.explorer_cache.insert(dir, entries);
-        }
-        reloaded
     }
 
     /// Collapse every expanded folder, returning the tree to just its roots.
@@ -1227,42 +1206,6 @@ mod tests {
 
         assert!(after.contains(&"added.rs".to_string()));
         assert!(ws.explorer_expanded.contains(&src));
-    }
-
-    #[test]
-    fn applying_a_watcher_event_restats_only_the_affected_loaded_directory() {
-        let base = temp_tree("watch-apply");
-        let mut ws = Workspace::test_new("ws");
-        ws.explorer_set_root(base.clone());
-        let src = base.join("src");
-        ws.explorer_toggle_expand(&src);
-
-        // A new file lands inside the expanded (loaded) folder, as an agent pane
-        // might create it; the watcher reports the created path.
-        std::fs::write(src.join("added.rs"), b"x").unwrap();
-        let reloaded = ws.explorer_apply_changed_paths(&[src.join("added.rs")]);
-
-        // The affected directory was re-stated and the new file now shows, while
-        // the folder stays expanded.
-        assert!(reloaded);
-        let names: Vec<String> = ws
-            .explorer_rows()
-            .into_iter()
-            .filter_map(|r| match r {
-                FileTreeRow::Node(n) => Some(n.name),
-                FileTreeRow::Empty { .. } => None,
-            })
-            .collect();
-        assert!(names.contains(&"added.rs".to_string()));
-        assert!(ws.explorer_expanded.contains(&src));
-
-        // An event whose containing directory was never loaded into the cache
-        // touches nothing and reports no change — it never reads that subtree in.
-        let untracked = base.join("ghost").join("x.rs");
-        assert!(!ws.explorer_apply_changed_paths(&[untracked]));
-        assert!(!ws.explorer_cache.contains_key(&base.join("ghost")));
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
