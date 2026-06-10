@@ -13,7 +13,9 @@ use crate::app::state::{
 };
 use crate::app::{AppState, Mode};
 use crate::pane::ScrollMetrics;
-use crate::workspace::file_tree::{truncate_with_ellipsis, FileTreeNode, FileTreeRow};
+use crate::workspace::file_tree::{
+    truncate_with_ellipsis, FileTreeDecoration, FileTreeNode, FileTreeRow,
+};
 use crate::workspace::{ChangeStatus, ChangedFile, CommitInfo, FileEntryKind, SourcePanelMode};
 
 /// The mode-label texts of the header segmented control, in display order.
@@ -745,6 +747,13 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
         .and_then(|ws| ws.explorer_selected())
         .map(|path| path.to_path_buf());
 
+    // Roll the workspace's git status up onto the tree so changed files are
+    // colored and folders containing changes show a dot.
+    let decorations = source_panel_workspace_idx(app)
+        .and_then(|idx| app.workspaces.get(idx))
+        .map(|ws| ws.explorer_decorations())
+        .unwrap_or_default();
+
     for (row, rect) in source_panel_explorer_visible_rows(app, area) {
         match row {
             FileTreeRow::Node(node) => {
@@ -752,7 +761,8 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
                 if highlighted {
                     highlight_row(frame, rect, p.surface0);
                 }
-                render_explorer_node_row(frame, rect, &node, p);
+                let decoration = decorations.get(&node.path);
+                render_explorer_node_row(frame, rect, &node, decoration, p);
             }
             FileTreeRow::Empty { depth } => render_explorer_empty_row(frame, rect, depth, p),
         }
@@ -767,8 +777,16 @@ fn render_source_panel_explorer(app: &AppState, frame: &mut Frame, area: Rect) {
 
 /// Render one tree row: `<indent><chevron|marker> <name>`, with the name
 /// truncated to fit. Directories show ▸/▾; files and symlinks show a neutral
-/// marker.
-fn render_explorer_node_row(frame: &mut Frame, row: Rect, node: &FileTreeNode, p: &Palette) {
+/// marker. A `decoration` from the git-status rollup recolors a changed file via
+/// the `ChangeStatus` palette, and appends a status dot to a folder that
+/// contains changes (visible even while collapsed).
+fn render_explorer_node_row(
+    frame: &mut Frame,
+    row: Rect,
+    node: &FileTreeNode,
+    decoration: Option<&FileTreeDecoration>,
+    p: &Palette,
+) {
     if row.width == 0 {
         return;
     }
@@ -786,23 +804,38 @@ fn render_explorer_node_row(frame: &mut Frame, row: Rect, node: &FileTreeNode, p
         FileEntryKind::Symlink => "↩",
         FileEntryKind::File => "·",
     };
-    let marker_color = match node.kind {
+    let default_marker_color = match node.kind {
         FileEntryKind::Directory => p.overlay0,
         _ => p.overlay1,
     };
-    let name_color = match node.kind {
+    let default_name_color = match node.kind {
         FileEntryKind::Directory => p.text,
         _ => p.subtext0,
     };
+    // A changed file is colored by its git status; the rolled-up folder marker is
+    // appended as a separate dot span below.
+    let (marker_color, name_color) = match decoration {
+        Some(FileTreeDecoration::Changed(status)) => {
+            let color = change_status_glyph(status, p).1;
+            (color, color)
+        }
+        _ => (default_marker_color, default_name_color),
+    };
+    // A folder containing changes shows a trailing dot in the changed accent.
+    let rollup_dot = matches!(decoration, Some(FileTreeDecoration::ContainsChanges));
+    let dot_cols = if rollup_dot { 2 } else { 0 }; // " •"
     let prefix_cols = indent + 2; // indent + marker + space
-    let name_width = (row.width as usize).saturating_sub(prefix_cols);
+    let name_width = (row.width as usize).saturating_sub(prefix_cols + dot_cols);
     let name = truncate_with_ellipsis(&node.name, name_width);
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(" ".repeat(indent), Style::default()),
         Span::styled(marker, Style::default().fg(marker_color)),
         Span::styled(" ", Style::default()),
         Span::styled(name, Style::default().fg(name_color)),
     ];
+    if rollup_dot {
+        spans.push(Span::styled(" •", Style::default().fg(p.yellow)));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
         Rect::new(row.x, row.y, row.width, 1),

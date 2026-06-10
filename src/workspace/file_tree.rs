@@ -9,6 +9,52 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::workspace::{ChangeStatus, ChangedFile};
+
+/// The git-status decoration the rollup attaches to a tree path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileTreeDecoration {
+    /// An exactly-changed file, carrying its precise git status so the row is
+    /// colored via the source panel's `ChangeStatus` palette.
+    Changed(ChangeStatus),
+    /// A folder on the ancestry of one or more changed files. Collapsed or not,
+    /// it shows a rolled-up status dot.
+    ContainsChanges,
+}
+
+/// Roll the workspace's changed-files set up the Explorer tree. A pure
+/// prefix-match over the paths, reading no filesystem: each change's path is
+/// resolved against `root` and mapped to [`FileTreeDecoration::Changed`], and
+/// every ancestor directory between that file and `root` (exclusive of `root`
+/// itself, inclusive of the immediate parent) is marked
+/// [`FileTreeDecoration::ContainsChanges`]. So a collapsed folder containing a
+/// change shows a dot without being expanded, while folders off the changed
+/// paths' ancestry get no entry at all. Change paths are matched as given
+/// (joined onto `root`); they are never read from disk.
+pub fn rollup_git_status(
+    root: &Path,
+    changes: &[ChangedFile],
+) -> HashMap<PathBuf, FileTreeDecoration> {
+    let mut decorations = HashMap::new();
+    for change in changes {
+        let path = root.join(&change.path);
+        // Mark each ancestor up to (but not including) the root.
+        let mut ancestors = path.ancestors();
+        ancestors.next(); // skip the file path itself
+        for ancestor in ancestors {
+            if ancestor == root {
+                break;
+            }
+            decorations
+                .entry(ancestor.to_path_buf())
+                .or_insert(FileTreeDecoration::ContainsChanges);
+        }
+        // The file's own precise status wins over any rolled-up marker.
+        decorations.insert(path, FileTreeDecoration::Changed(change.status.clone()));
+    }
+    decorations
+}
+
 /// What kind of filesystem object a tree entry is. Symlinks are a distinct
 /// variant — they are shown in the tree but never followed, so a symlink to a
 /// directory is a non-expandable leaf and the tree never recurses into it
@@ -174,6 +220,7 @@ fn flatten_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::{ChangeStatus, ChangedFile};
 
     fn entry(name: &str, kind: FileEntryKind) -> FileTreeEntry {
         FileTreeEntry {
@@ -377,6 +424,55 @@ mod tests {
             !symlink.is_expandable_dir(),
             "a symlink must never be expandable, so the tree is never followed into it"
         );
+    }
+
+    fn changed(path: &str, status: ChangeStatus) -> ChangedFile {
+        ChangedFile {
+            path: PathBuf::from(path),
+            status,
+        }
+    }
+
+    #[test]
+    fn rollup_decorates_changed_files_and_marks_every_ancestor_folder() {
+        let root = PathBuf::from("/root");
+        // Two changes nested at different depths, plus an unrelated folder
+        // (tests/) that contains no change.
+        let changes = vec![
+            changed("src/app/state.rs", ChangeStatus::Modified),
+            changed("docs/readme.md", ChangeStatus::Added),
+        ];
+
+        let decorations = rollup_git_status(&root, &changes);
+
+        // The changed files carry their precise status.
+        assert_eq!(
+            decorations.get(&root.join("src/app/state.rs")),
+            Some(&FileTreeDecoration::Changed(ChangeStatus::Modified)),
+        );
+        assert_eq!(
+            decorations.get(&root.join("docs/readme.md")),
+            Some(&FileTreeDecoration::Changed(ChangeStatus::Added)),
+        );
+
+        // Every ancestor folder up to the root is marked as containing changes,
+        // so a collapsed folder shows a rolled-up dot.
+        assert_eq!(
+            decorations.get(&root.join("src/app")),
+            Some(&FileTreeDecoration::ContainsChanges),
+        );
+        assert_eq!(
+            decorations.get(&root.join("src")),
+            Some(&FileTreeDecoration::ContainsChanges),
+        );
+        assert_eq!(
+            decorations.get(&root.join("docs")),
+            Some(&FileTreeDecoration::ContainsChanges),
+        );
+
+        // Unrelated folders are never marked.
+        assert_eq!(decorations.get(&root.join("tests")), None);
+        assert_eq!(decorations.get(&root.join("src/ui")), None);
     }
 
     #[test]

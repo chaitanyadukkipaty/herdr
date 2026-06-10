@@ -809,6 +809,17 @@ impl Workspace {
         file_tree::flatten_tree(root, &self.explorer_cache, &self.explorer_expanded)
     }
 
+    /// Git-status decorations for the Explorer tree: the workspace's cached
+    /// changed files rolled up onto the rooted tree (changed files colored,
+    /// ancestor folders marked). Empty until the tree has been rooted. Pure over
+    /// the cached state — reads no filesystem.
+    pub fn explorer_decorations(&self) -> HashMap<PathBuf, file_tree::FileTreeDecoration> {
+        let Some(root) = self.explorer_root.as_deref() else {
+            return HashMap::new();
+        };
+        file_tree::rollup_git_status(root, &self.cached_changes)
+    }
+
     pub fn branch(&self) -> Option<String> {
         self.cached_git_branch.clone()
     }
@@ -1088,6 +1099,32 @@ mod tests {
             .collect();
         let _ = std::fs::remove_dir_all(&base);
         assert_eq!(names, vec!["src".to_string(), "README.md".to_string()]);
+    }
+
+    #[test]
+    fn explorer_decorations_roll_cached_changes_up_the_tree() {
+        let base = temp_tree("decorate");
+        let mut ws = Workspace::test_new("ws");
+        ws.explorer_set_root(base.clone());
+        // A change recorded relative to the workspace cwd, as git status reports.
+        ws.cached_changes = vec![ChangedFile {
+            path: PathBuf::from("src/main.rs"),
+            status: ChangeStatus::Modified,
+        }];
+
+        let decorations = ws.explorer_decorations();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            decorations.get(&base.join("src/main.rs")),
+            Some(&crate::workspace::file_tree::FileTreeDecoration::Changed(
+                ChangeStatus::Modified
+            )),
+        );
+        assert_eq!(
+            decorations.get(&base.join("src")),
+            Some(&crate::workspace::file_tree::FileTreeDecoration::ContainsChanges),
+        );
     }
 
     #[test]
