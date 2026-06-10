@@ -1098,6 +1098,9 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
+            // A new tab can resolve to a different repo/working directory, so
+            // refresh the source panel to reflect the tab we just switched to.
+            self.request_source_panel_git_refresh = true;
         }
     }
 
@@ -2280,6 +2283,22 @@ impl AppState {
                 ws.cached_git_space = result.space;
                 changed = true;
             }
+            if ws.cached_changes != result.changes {
+                ws.cached_changes = result.changes;
+                changed = true;
+            }
+            if ws.cached_log != result.log {
+                ws.cached_log = result.log;
+                changed = true;
+            }
+            if ws.cached_log_has_more != result.log_has_more {
+                ws.cached_log_has_more = result.log_has_more;
+                changed = true;
+            }
+            if ws.cached_is_git_repo != result.is_git_repo {
+                ws.cached_is_git_repo = result.is_git_repo;
+                changed = true;
+            }
         }
         changed
     }
@@ -2790,6 +2809,15 @@ impl AppState {
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
+        // Reusing the source-panel diff pane swaps its terminal runtime in place;
+        // dropping the outgoing runtime kills its child, which fires `PaneDied`
+        // for a pane that is in fact still alive with its new runtime. Skip that
+        // one death so the pane is not torn down out from under the replacement.
+        // A genuine death (the user quitting the pager) is not suppressed and
+        // closes the pane as usual.
+        if self.suppress_pane_death.remove(&pane_id) {
+            return;
+        }
         self.pending_agent_notifications.remove(&pane_id);
         let ws_idx = self
             .workspaces
@@ -3387,6 +3415,10 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
                 space: None,
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             }],
         );
 
@@ -3413,6 +3445,10 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             }],
         );
 
@@ -3438,6 +3474,10 @@ mod tests {
                 branch: None,
                 ahead_behind: None,
                 space: None,
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             }],
         );
 
@@ -3469,6 +3509,10 @@ mod tests {
                     repo_root: "/other/repo".into(),
                     is_linked_worktree: false,
                 }),
+                changes: Vec::new(),
+                log: Vec::new(),
+                log_has_more: false,
+                is_git_repo: true,
             }],
         );
 
@@ -3695,6 +3739,19 @@ mod tests {
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].active_tab, second_tab);
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(second_tab_root));
+    }
+
+    #[test]
+    fn switch_tab_requests_source_panel_refresh() {
+        let mut state = app_with_workspaces(&["one"]);
+        let second_tab = state.workspaces[0].test_add_tab(Some("logs"));
+        state.request_source_panel_git_refresh = false;
+
+        state.switch_tab(second_tab);
+
+        // A different tab can resolve to a different repo, so the source panel
+        // must refresh rather than keep showing the previous tab's status.
+        assert!(state.request_source_panel_git_refresh);
     }
 
     #[test]
@@ -3926,6 +3983,27 @@ mod tests {
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].panes.len(), 1);
+    }
+
+    #[test]
+    fn suppressed_pane_death_keeps_pane_and_is_one_shot() {
+        // Reuse swaps the diff pane's runtime in place; the outgoing runtime's
+        // death must not tear the (still-live) pane down. A second, unrelated
+        // pane keeps the workspace alive so removal is observable.
+        let mut state = app_with_workspaces(&["test"]);
+        let diff_pane = *state.workspaces[0].panes.keys().next().unwrap();
+        let _other = state.workspaces[0].test_split(Direction::Horizontal);
+        state.suppress_pane_death.insert(diff_pane);
+
+        state.handle_pane_died(diff_pane);
+
+        // The pane survives and the suppression is consumed (one-shot).
+        assert!(state.workspaces[0].panes.contains_key(&diff_pane));
+        assert!(!state.suppress_pane_death.contains(&diff_pane));
+
+        // A subsequent genuine death (the user quitting the pager) closes it.
+        state.handle_pane_died(diff_pane);
+        assert!(!state.workspaces[0].panes.contains_key(&diff_pane));
     }
 
     #[test]

@@ -21,10 +21,12 @@ mod tab;
 
 #[cfg(test)]
 use self::git::git_ahead_behind;
+pub(crate) use self::git::{commit_files_for_cwd, DEFAULT_LOADED_COMMIT_COUNT};
 pub use self::{
     git::{
-        derive_label_from_cwd, git_branch, git_space_metadata, git_status_cache_key,
-        GitSpaceMetadata, GitStatusCacheEntry,
+        changed_file_diff_argv, commit_file_diff_argv, commit_show_argv, derive_label_from_cwd,
+        git_branch, git_space_metadata, git_status_cache_key, ChangeStatus, ChangedFile,
+        CommitInfo, GitSpaceMetadata, GitStatusCacheEntry,
     },
     tab::Tab,
 };
@@ -45,6 +47,10 @@ pub struct WorkspaceGitStatus {
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
+    pub changes: Vec<ChangedFile>,
+    pub log: Vec<CommitInfo>,
+    pub log_has_more: bool,
+    pub is_git_repo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +58,12 @@ pub struct WorkspaceGitStatusSnapshot {
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
+    pub changes: Vec<ChangedFile>,
+    pub log: Vec<CommitInfo>,
+    pub log_has_more: bool,
+    /// Whether `identity_cwd` resolved to a usable git repository. Drives the
+    /// source-control panel's "not a git repository" empty state.
+    pub is_git_repo: bool,
 }
 
 impl WorkspaceGitStatusSnapshot {
@@ -66,6 +78,10 @@ impl WorkspaceGitStatusSnapshot {
             branch: self.branch,
             ahead_behind: self.ahead_behind,
             space: self.space,
+            changes: self.changes,
+            log: self.log,
+            log_has_more: self.log_has_more,
+            is_git_repo: self.is_git_repo,
         }
     }
 }
@@ -95,6 +111,17 @@ pub struct Workspace {
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
+    /// Cached working-tree changes for the source-control panel.
+    pub(crate) cached_changes: Vec<ChangedFile>,
+    /// Cached commit graph (most recent `loaded_commit_count`) for the panel.
+    pub(crate) cached_log: Vec<CommitInfo>,
+    /// Number of commits the graph section loads. Bumped by "load more".
+    pub(crate) loaded_commit_count: usize,
+    /// Whether the repository has history beyond `cached_log`.
+    pub(crate) cached_log_has_more: bool,
+    /// Whether `identity_cwd` resolved to a usable git repository. Drives the
+    /// source-control panel's "not a git repository" empty state.
+    pub(crate) cached_is_git_repo: bool,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
     /// Stable-ish public pane numbers within this workspace.
@@ -224,6 +251,11 @@ impl Workspace {
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
                 cached_git_space: None,
+                cached_changes: Vec::new(),
+                cached_log: Vec::new(),
+                loaded_commit_count: DEFAULT_LOADED_COMMIT_COUNT,
+                cached_log_has_more: false,
+                cached_is_git_repo: git_status_cache_key(&initial_cwd).is_some(),
                 worktree_space: None,
                 public_pane_numbers,
                 next_public_pane_number: 2,
@@ -625,8 +657,12 @@ impl Workspace {
         terminals: &HashMap<TerminalId, TerminalState>,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> Option<PathBuf> {
-        self.tabs
-            .first()
+        // Resolve from the *active* tab's root pane so the workspace's git
+        // context (branch, changes, and commit graph, plus the derived label)
+        // follows the tab the user is currently looking at. Falls back to the
+        // first tab, then the stored identity cwd, when a runtime cwd is absent.
+        self.active_tab()
+            .or_else(|| self.tabs.first())
             .and_then(|tab| tab.cwd_for_pane(tab.root_pane, terminals, terminal_runtimes))
             .or_else(|| Some(self.identity_cwd.clone()))
     }
@@ -667,6 +703,31 @@ impl Workspace {
         self.cached_git_space.as_ref()
     }
 
+    pub fn changed_files(&self) -> &[ChangedFile] {
+        &self.cached_changes
+    }
+
+    pub fn commits(&self) -> &[CommitInfo] {
+        &self.cached_log
+    }
+
+    pub fn loaded_commit_count(&self) -> usize {
+        self.loaded_commit_count
+    }
+
+    /// Whether the repository has commit history beyond `cached_log`, used to
+    /// decide whether the Graph section shows a "load more" affordance.
+    pub fn has_more_commits(&self) -> bool {
+        self.cached_log_has_more
+    }
+
+    /// Whether the workspace's identity directory is a usable git repository.
+    /// When false, the source-control panel shows its "not a git repository"
+    /// empty state instead of the changes/graph sections.
+    pub fn is_git_repo(&self) -> bool {
+        self.cached_is_git_repo
+    }
+
     pub fn worktree_space(&self) -> Option<&WorktreeSpaceMembership> {
         self.worktree_space.as_ref()
     }
@@ -682,8 +743,9 @@ impl Workspace {
     pub fn git_status_snapshot_for_cwd_with_cache(
         resolved_identity_cwd: &std::path::Path,
         cached: Option<&GitStatusCacheEntry>,
+        commit_count: usize,
     ) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
-        self::git::git_status_snapshot_for_cwd(resolved_identity_cwd, cached)
+        self::git::git_status_snapshot_for_cwd(resolved_identity_cwd, cached, commit_count)
     }
 
     pub fn find_tab_index_for_pane(&self, pane_id: PaneId) -> Option<usize> {
@@ -796,6 +858,11 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
+            cached_changes: Vec::new(),
+            cached_log: Vec::new(),
+            loaded_commit_count: DEFAULT_LOADED_COMMIT_COUNT,
+            cached_log_has_more: false,
+            cached_is_git_repo: true,
             worktree_space: None,
             public_pane_numbers,
             next_public_pane_number: 2,

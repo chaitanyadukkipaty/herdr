@@ -38,7 +38,7 @@ pub(crate) struct RightClickPassthroughGesture {
     pub modifiers: KeyModifiers,
 }
 use crate::terminal_theme::TerminalTheme;
-use crate::workspace::Workspace;
+use crate::workspace::{ChangedFile, Workspace};
 
 // ---------------------------------------------------------------------------
 // Theme palette — all UI colors in one place, ready for theming
@@ -567,6 +567,45 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// A clickable changed-file row in the source-control panel's Changes section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePanelFileArea {
+    pub rect: Rect,
+    pub change_idx: usize,
+}
+
+/// A clickable commit row in the source-control panel's Graph section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePanelCommitArea {
+    pub rect: Rect,
+    pub log_idx: usize,
+}
+
+/// A clickable file row shown inline beneath an expanded commit in the Graph
+/// section. `log_idx` identifies the parent commit row; `file_idx` indexes into
+/// that commit's cached file list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePanelCommitFileArea {
+    pub rect: Rect,
+    pub log_idx: usize,
+    pub file_idx: usize,
+}
+
+/// The source-panel item whose diff/`git show` currently occupies the diff pane.
+/// Used to highlight the originating row while its content is displayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourcePanelActiveItem {
+    /// A working-tree change from the Changes section.
+    WorkingFile(std::path::PathBuf),
+    /// A whole commit opened via `git show <sha>`.
+    Commit(String),
+    /// A single file within a commit, `git show <sha> -- <path>`.
+    CommitFile {
+        sha: String,
+        path: std::path::PathBuf,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -721,6 +760,20 @@ pub enum ViewLayout {
 pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
+    pub source_panel_rect: Rect,
+    pub source_panel_toggle_rect: Rect,
+    /// The draggable divider between the Changes and Graph sections.
+    pub source_panel_section_divider_rect: Rect,
+    pub source_panel_changes_card_areas: Vec<SourcePanelFileArea>,
+    /// The clickable ↻ refresh glyph in the Changes section header.
+    pub source_panel_changes_refresh_rect: Rect,
+    pub source_panel_log_card_areas: Vec<SourcePanelCommitArea>,
+    /// Clickable file rows shown inline beneath expanded commits.
+    pub source_panel_commit_file_card_areas: Vec<SourcePanelCommitFileArea>,
+    /// The clickable ↻ refresh glyph in the Graph section header.
+    pub source_panel_log_refresh_rect: Rect,
+    /// The clickable " load more" row, present when more history is available.
+    pub source_panel_load_more_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
@@ -1016,6 +1069,14 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     SidebarSectionDivider,
+    SourcePanelResize {
+        start_x: u16,
+        start_width: u16,
+    },
+    SourcePanelSectionResize {
+        start_y: u16,
+        start_ratio: f32,
+    },
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -1235,6 +1296,17 @@ pub enum SidebarWidthSource {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePanelWidthSource {
+    ConfigDefault,
+    Manual,
+}
+
+/// Minimum source panel width (columns) when expanded.
+pub const SOURCE_PANEL_MIN_WIDTH: u16 = 18;
+/// Maximum source panel width (columns) when expanded.
+pub const SOURCE_PANEL_MAX_WIDTH: u16 = 36;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PaneFocusTarget {
     pub workspace_id: String,
@@ -1262,6 +1334,9 @@ pub struct AppState {
     pub detach_requested: bool,
     pub request_new_workspace: bool,
     pub request_new_tab: bool,
+    /// Set when the source panel's Changes refresh icon is clicked; consumed by
+    /// the app loop, which fires the same git-status refresh as the auto-tick.
+    pub request_source_panel_git_refresh: bool,
     pub request_new_linked_worktree: Option<usize>,
     pub request_open_existing_worktree: Option<usize>,
     pub request_new_workspace_cwd: Option<std::path::PathBuf>,
@@ -1330,6 +1405,38 @@ pub struct AppState {
     pub sidebar_collapsed: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
+    // Source control panel (right sidebar)
+    pub default_source_panel_width: u16,
+    pub source_panel_width: u16,
+    pub source_panel_min_width: u16,
+    pub source_panel_max_width: u16,
+    pub source_panel_width_source: SourcePanelWidthSource,
+    pub source_panel_collapsed: bool,
+    /// Ratio of source panel height allocated to the changes section.
+    pub source_panel_section_split: f32,
+    /// Rows scrolled past the top of the Changes section.
+    pub source_panel_changes_scroll: usize,
+    /// Rows scrolled past the top of the Graph section.
+    pub source_panel_log_scroll: usize,
+    /// Pane currently showing a source-panel diff/`git show`. Clicking another
+    /// file or commit replaces this pane's content instead of splitting a new
+    /// one; `None` (or a since-closed pane) spawns a fresh pane.
+    pub source_panel_diff_pane: Option<PaneId>,
+    /// Shas of commits expanded inline in the Graph section to reveal the files
+    /// they touched. Several may be expanded at once.
+    pub source_panel_expanded_commits: std::collections::HashSet<String>,
+    /// Per-commit file lists (keyed by sha), fetched lazily the first time a
+    /// commit is expanded and kept so re-expanding is instant.
+    pub source_panel_commit_files: std::collections::HashMap<String, Vec<ChangedFile>>,
+    /// The source-panel row whose content currently fills the diff pane, used to
+    /// highlight it. Cleared when the diff pane is gone.
+    pub source_panel_active_item: Option<SourcePanelActiveItem>,
+    /// Panes whose next `PaneDied` must be ignored because their runtime was
+    /// just replaced in place (the source panel reusing its diff pane for a new
+    /// `git show`/`git diff`). Dropping the outgoing runtime kills its child and
+    /// fires `PaneDied` for a pane that is still alive with its new runtime; each
+    /// entry absorbs one such spurious death.
+    pub suppress_pane_death: std::collections::HashSet<PaneId>,
     pub agent_panel_scope: AgentPanelScope,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -1597,6 +1704,7 @@ impl AppState {
             detach_requested: false,
             request_new_workspace: false,
             request_new_tab: false,
+            request_source_panel_git_refresh: false,
             request_new_linked_worktree: None,
             request_open_existing_worktree: None,
             request_new_workspace_cwd: None,
@@ -1631,6 +1739,15 @@ impl AppState {
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
+                source_panel_rect: Rect::default(),
+                source_panel_toggle_rect: Rect::default(),
+                source_panel_section_divider_rect: Rect::default(),
+                source_panel_changes_card_areas: Vec::new(),
+                source_panel_changes_refresh_rect: Rect::default(),
+                source_panel_log_card_areas: Vec::new(),
+                source_panel_commit_file_card_areas: Vec::new(),
+                source_panel_log_refresh_rect: Rect::default(),
+                source_panel_load_more_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
@@ -1670,6 +1787,20 @@ impl AppState {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_section_split: 0.5,
+            default_source_panel_width: 26,
+            source_panel_width: 26,
+            source_panel_min_width: 18,
+            source_panel_max_width: 36,
+            source_panel_width_source: SourcePanelWidthSource::ConfigDefault,
+            source_panel_collapsed: false,
+            source_panel_section_split: 0.5,
+            source_panel_changes_scroll: 0,
+            source_panel_log_scroll: 0,
+            source_panel_diff_pane: None,
+            source_panel_expanded_commits: std::collections::HashSet::new(),
+            source_panel_commit_files: std::collections::HashMap::new(),
+            source_panel_active_item: None,
+            suppress_pane_death: std::collections::HashSet::new(),
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             mouse_capture: true,
             right_click_passthrough_modifiers: None,

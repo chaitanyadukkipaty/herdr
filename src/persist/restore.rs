@@ -329,6 +329,12 @@ fn restore_workspace(
             cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: crate::workspace::git_space_metadata(&snap.identity_cwd),
+            cached_changes: Vec::new(),
+            cached_log: Vec::new(),
+            loaded_commit_count: crate::workspace::DEFAULT_LOADED_COMMIT_COUNT,
+            cached_log_has_more: false,
+            cached_is_git_repo: crate::workspace::git_status_cache_key(&snap.identity_cwd)
+                .is_some(),
             worktree_space,
             public_pane_numbers,
             next_public_pane_number,
